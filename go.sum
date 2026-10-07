@@ -1,0 +1,12 @@
+github.com/cenkalti/backoff/v7 v7.0.1 h1:+ulHti5s1d9QnfyOnLWVmQ/SaZ+TJQF9OdOI0i9BGZI=
+github.com/cenkalti/backoff/v7 v7.0.1/go.mod h1:qcKBGwsu4hpxHtQ8tWYsQ+ifzx2+sS+Xx/3jfe30lI8=
+github.com/deploymenttheory/go-bindings-win32 v0.5.0 h1:B5qu2L+XvQRPe0/ni7Q9PAu3j3it94cyDJjGTeMLG/o=
+github.com/deploymenttheory/go-bindings-win32 v0.5.0/go.mod h1:J3mOfF0N1uFmI8Cm3GPtq1YJYnwAKUkOsmc36GYbm0w=
+github.com/ebitengine/purego v0.11.0-alpha.6 h1:xZ7KkRHWH0O/DskwUkFfd6Y4X9vtth85b4iEmNDeIME=
+github.com/ebitengine/purego v0.11.0-alpha.6/go.mod h1:DCHPP08djqhNSoTfImcnHYQRZmd0qhakvrozqaEYhGQ=
+github.com/gostafa/singleton v0.0.2 h1:ECC2sfKFJEl/+etyb2HVJhu01HxmtRBLGM+56yznlA8=
+github.com/gostafa/singleton v0.0.2/go.mod h1:GtMa/e5kBbsud+4bECBQP2CtWDi85H0rFchSyjY28dw=
+github.com/holoplot/go-evdev v0.0.0-20260909133534-d873ed210bda h1:/5a6e/KLg8R+KhKxK+ze8CPBumoJQwN64KSHksirun0=
+github.com/holoplot/go-evdev v0.0.0-20260909133534-d873ed210bda/go.mod h1:iHAf8OIncO2gcQ8XOjS7CMJ2aPbX2Bs0wl5pZyanEqk=
+github.com/tmc/apple v0.6.18 h1:LqBbhPpK/u9umMAKeW5DQ4NJa89//odfp1j3cqCKYSM=
+github.com/tmc/apple v0.6.18/go.mod h1:2JgTfzQdQhX0loSpiOmxFxEMFm3BYDW6Bw9RvrSYgIg=
