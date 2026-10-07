@@ -10,8 +10,12 @@ import (
 	engine "github.com/gostafa/singleton"
 )
 
+const (
+	initializationAttempts = 1
+)
+
 // New constructs a lazy provider. Its factory only allocates Go coordinator
 // state, so one attempt prevents nesting initialization and discovery retries.
 func New[T any](factory func(context.Context) (T, error)) ports.Provider[T] {
-	return engine.MustNew(factory, engine.WithMaxAttempts(1))
+	return engine.MustNew(factory, engine.WithMaxAttempts(initializationAttempts))
 }

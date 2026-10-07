@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"reflect"
 	"slices"
 
@@ -16,55 +15,41 @@ import (
 	"github.com/gostafa/goinput/internal/implementation"
 )
 
+const (
+	normalizedMinimum = 0
+	errorPairSize     = 2
+	publicErrorIndex  = 1
+)
+
 // HID constructs a usage from its standard page and ID.
 func HID(page, id uint16) Usage { return Usage(uint32(page)<<16 | uint32(id)) }
 
-func (u Usage) Page() uint16   { return uint16(uint32(u) >> 16) }
-func (u Usage) ID() uint16     { return uint16(u) }
+// Page returns the HID usage page.
+func (u Usage) Page() uint16 { return uint16(uint32(u) >> 16) }
+
+// ID returns the usage ID within its HID page.
+func (u Usage) ID() uint16 { return uint16(u) }
+
 func (u Usage) String() string { return fmt.Sprintf("%04x:%04x", u.Page(), u.ID()) }
-
-// Normalize explicitly scales a logical absolute axis into [0,1]. It does not
-// infer a centered axis, deadzone, or physical unit. Invalid/null values, relative
-// axes, hats, and unknown or degenerate ranges return false.
-func (c Control) Normalize(value float64) (float64, bool) {
-	if c.Kind != ControlAxis || c.Mode != AxisAbsolute || c.Range == nil ||
-		c.Range.Max <= c.Range.Min || math.IsNaN(value) || math.IsInf(value, 0) {
-
-		return 0, false
-	}
-
-	lo, hi := float64(c.Range.Min), float64(c.Range.Max)
-	if hi <= lo || value < lo || value > hi {
-		return 0, false
-	}
-
-	return (value - lo) / (hi - lo), true
-}
-
-func (e *OpError) Error() string {
-	if e.DeviceID == "" {
-		return fmt.Sprintf("goinput: %s: %v", e.Op, e.Err)
-	}
-
-	return fmt.Sprintf("goinput: %s %s: %v", e.Op, e.DeviceID, e.Err)
-}
-
-func (e *OpError) Unwrap() error { return e.Err }
 
 // New creates a manager without opening devices or starting native resources.
 // BufferSize zero selects 256 events per device.
-func New(options Options) (*Manager, error) {
-	impl, err := implementation.New(domain.Options(options))
-	if err != nil {
-		return nil, publicError(err)
+func New(options Options, system *System) (*Manager, error) {
+	if system == nil || system.provider == nil {
+		return nil, ErrInvalidOptions
 	}
 
-	return &Manager{impl: impl}, nil
+	impl, err := implementation.New(options, system.provider)
+	if err != nil {
+		return nil, errors.Join(publicError(err))
+	}
+
+	return newManagerView(application.ManagerView(impl)), nil
 }
 
 // Devices returns accessible endpoints together with any partial discovery diagnostics.
-func (m *Manager) Devices(ctx context.Context) ([]DeviceInfo, error) {
-	infos, err := m.impl.Devices(ctx)
+func managerDevices(ctx context.Context, impl managerImpl) ([]DeviceInfo, error) {
+	infos, err := impl.Devices(ctx)
 
 	var result []DeviceInfo
 
@@ -72,114 +57,108 @@ func (m *Manager) Devices(ctx context.Context) ([]DeviceInfo, error) {
 		result = make([]DeviceInfo, len(infos))
 	}
 
-	for i, info := range infos {
-		result[i] = publicInfo(info)
+	for i := range infos {
+		result[i] = publicInfo(&infos[i])
 	}
 
-	return result, publicError(err)
+	return result, errors.Join(publicError(err))
 }
 
 // Open starts an independent event stream.
-func (m *Manager) Open(ctx context.Context, id DeviceID) (Device, error) {
-	impl, err := m.impl.Open(ctx, domain.DeviceID(id))
+func managerOpen(ctx context.Context, impl managerImpl, id DeviceID) (*device, error) {
+	opened, err := impl.Open(ctx, domain.DeviceID(id))
 	if err != nil {
-		return nil, publicError(err)
+		return nil, errors.Join(publicError(err))
 	}
 
-	return &device{impl: impl}, nil
+	return newDeviceView(opened), nil
 }
 
 // Close cancels pending operations, closes captures, and releases the session lease.
-func (m *Manager) Close() error              { return publicError(m.impl.Close()) }
-func (d *device) Info() DeviceInfo           { return publicInfo(d.impl.Info()) }
-func (d *device) Capabilities() Capabilities { return publicCapabilities(d.impl.Capabilities()) }
-func (d *device) Read(ctx context.Context) (Event, error) {
-	e, err := d.impl.Read(ctx)
+func managerClose(impl managerImpl) error { return errors.Join(publicError(impl.Close())) }
+
+func deviceInfo(impl application.Device) DeviceInfo {
+	info := impl.Info()
+
+	return publicInfo(&info)
+}
+
+func deviceCapabilities(impl application.Device) Capabilities {
+	capabilities := impl.Capabilities()
+
+	return publicCapabilities(&capabilities)
+}
+
+func deviceRead(ctx context.Context, impl application.Device) (Event, error) {
+	event, err := impl.Read(ctx)
 
 	return Event{
-		DeviceID:  DeviceID(e.DeviceID),
-		ControlID: ControlID(e.ControlID),
-		Action:    EventAction(e.Action),
-		Value:     e.Value,
+		DeviceID:  DeviceID(event.DeviceID),
+		ControlID: ControlID(event.ControlID),
+		Action:    EventAction(event.Action),
+		Value:     event.Value,
 		Timestamp: Timestamp{
-			Time:       e.Timestamp.Time,
-			ReceivedAt: e.Timestamp.ReceivedAt,
-			Source:     TimestampSource(e.Timestamp.Source),
+			Time:       event.Timestamp.Time,
+			ReceivedAt: event.Timestamp.ReceivedAt,
+			Source:     TimestampSource(event.Timestamp.Source),
 		},
-	}, publicError(err)
+	}, errors.Join(publicError(err))
 }
-func (d *device) Close() error { return publicError(d.impl.Close()) }
-func (d *device) Extension(target any) bool {
-	provider, ok := d.impl.(application.ExtensionProvider)
+
+func deviceClose(impl application.Device) error { return errors.Join(publicError(impl.Close())) }
+
+func deviceExtension(impl application.Device, target any) bool {
+	provider, ok := impl.(application.ExtensionProvider)
 
 	return ok && provider.Extension(target)
 }
 
-func publicInfo(i domain.DeviceInfo) DeviceInfo {
-	r := DeviceInfo{
-		ID: DeviceID(i.ID), Name: i.Name, Path: i.Path, Manufacturer: i.Manufacturer,
-		Serial: i.Serial, Transport: Transport(i.Transport),
+func publicInfo(info *domain.DeviceInfo) DeviceInfo {
+	return DeviceInfo{
+		ID: DeviceID(info.ID), Name: info.Name, Path: info.Path, Manufacturer: info.Manufacturer,
+		Serial: info.Serial, Transport: Transport(info.Transport),
+		VendorID: clonePointer(info.VendorID), ProductID: clonePointer(info.ProductID),
+		Classes: publicClasses(info.Classes),
 	}
-	if i.VendorID != nil {
-		v := *i.VendorID
-
-		r.VendorID = &v
-	}
-
-	if i.ProductID != nil {
-		v := *i.ProductID
-
-		r.ProductID = &v
-	}
-
-	if i.Classes != nil {
-		r.Classes = make([]DeviceClass, len(i.Classes))
-	}
-
-	for n, c := range i.Classes {
-		r.Classes[n] = DeviceClass(c)
-	}
-
-	return r
 }
 
-func publicCapabilities(c domain.Capabilities) Capabilities {
-	r := Capabilities{Complete: c.Complete, Repeat: Support(c.Repeat)}
-	if c.Controls != nil {
-		r.Controls = make([]Control, len(c.Controls))
+func publicCapabilities(capabilities *domain.Capabilities) Capabilities {
+	result := Capabilities{
+		Controls: nil,
+		Complete: capabilities.Complete,
+		Repeat:   Support(capabilities.Repeat),
+	}
+	if capabilities.Controls != nil {
+		result.Controls = make([]Control, len(capabilities.Controls))
 	}
 
-	for i, v := range c.Controls {
-		r.Controls[i] = Control{
-			ID:    ControlID(v.ID),
-			Name:  v.Name,
-			Kind:  ControlKind(v.Kind),
-			Usage: Usage(v.Usage),
-			Mapping: MappingSource(
-				v.Mapping,
-			),
-			Mode:    AxisMode(v.Mode),
-			Unit:    Unit(v.Unit),
-			Support: Support(v.Support),
-		}
-		if v.Range != nil {
-			r.Controls[i].Range = &Range{Min: v.Range.Min, Max: v.Range.Max}
-		}
+	for i := range capabilities.Controls {
+		result.Controls[i] = publicControl(&capabilities.Controls[i])
 	}
 
-	return r
+	return result
 }
 
-func (e *translatedError) Error() string   { return e.original.Error() }
-func (e *translatedError) Unwrap() []error { return slices.Clone(e.children) }
-func (e *translatedError) Is(target error) bool {
-	matcher, ok := e.original.(interface{ Is(error) bool })
+// Error retains the original wrapper's error text.
+func (e *translatedError) Error() string { return e.operations.message() }
 
-	return sameError(e.original, target) || ok && matcher.Is(target)
+// Unwrap exposes independently copied translated children.
+func (e *translatedError) Unwrap() []error { return e.operations.unwrap() }
+
+// Is retains custom matching from the original wrapper.
+func (e *translatedError) Is(target error) bool { return e.operations.match(target) }
+
+// As retains custom assignment from the original wrapper.
+func (e *translatedError) As(target any) bool { return e.operations.assign(target) }
+
+func originalMatches(original, target error) bool {
+	matcher, ok := original.(domain.ErrorMatcher)
+
+	return sameError(original, target) || ok && matcher.Is(target)
 }
 
-func (e *translatedError) As(target any) bool {
-	matcher, ok := e.original.(interface{ As(any) bool })
+func originalAssigns(original error, target any) bool {
+	matcher, ok := original.(domain.ErrorAssigner)
 
 	return ok && matcher.As(target)
 }
@@ -189,58 +168,20 @@ func publicError(err error) error {
 		return nil
 	}
 
-	switch {
-	case errors.Is(err, domain.ErrUnsupported):
-		return ErrUnsupported
-	case errors.Is(err, domain.ErrPermissionDenied):
-		return ErrPermissionDenied
-	case errors.Is(err, domain.ErrNotFound):
-		return ErrNotFound
-	case errors.Is(err, domain.ErrClosed):
-		return ErrClosed
-	case errors.Is(err, domain.ErrDisconnected):
-		return ErrDisconnected
-	case errors.Is(err, domain.ErrEventLoss):
-		return ErrEventLoss
-	case errors.Is(err, domain.ErrRegistrationConflict):
-		return ErrRegistrationConflict
-	case errors.Is(err, domain.ErrInvalidOptions):
-		return ErrInvalidOptions
+	translated := publicSentinel(err)
+	if translated != nil {
+		return errors.Join(translated)
 	}
 
-	e := &domain.OpError{}
-	if errors.As(err, &e) {
-		return &OpError{Op: e.Op, DeviceID: DeviceID(e.DeviceID), Err: publicError(e.Err)}
-	}
-
-	var children []error
-
-	{
-		var e interface{ Unwrap() []error }
-		var e1 interface{ Unwrap() error }
-		switch {
-		case errors.As(err, &e):
-			children = e.Unwrap()
-		case errors.As(err, &e1):
-			children = []error{e1.Unwrap()}
-		default:
-			return err
+	if operation, ok := errors.AsType[*domain.OpError](err); ok {
+		return &OpError{
+			Op:       operation.Op,
+			DeviceID: DeviceID(operation.DeviceID),
+			Err:      publicError(operation.Err),
 		}
 	}
 
-	changed := false
-	converted := make([]error, len(children))
-
-	for i, c := range children {
-		converted[i] = publicError(c)
-		changed = changed || !sameError(converted[i], c)
-	}
-
-	if !changed {
-		return err
-	}
-
-	return &translatedError{original: err, children: converted}
+	return errors.Join(publicWrappedError(err))
 }
 
 func sameError(a, b error) bool {
@@ -249,4 +190,105 @@ func sameError(a, b error) bool {
 	}
 
 	return reflect.TypeOf(a).Comparable() && errors.Is(a, b)
+}
+
+func clonePointer[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+
+	copyValue := *value
+
+	return &copyValue
+}
+
+func publicClasses(classes []domain.DeviceClass) []DeviceClass {
+	if classes == nil {
+		return nil
+	}
+
+	result := make([]DeviceClass, len(classes))
+	for index := range classes {
+		result[index] = DeviceClass(classes[index])
+	}
+
+	return result
+}
+
+func publicSentinel(err error) error {
+	pairs := [][errorPairSize]error{
+		{domain.ErrUnsupported, ErrUnsupported},
+		{domain.ErrPermissionDenied, ErrPermissionDenied},
+		{domain.ErrNotFound, ErrNotFound},
+		{domain.ErrClosed, ErrClosed},
+		{domain.ErrDisconnected, ErrDisconnected},
+		{domain.ErrEventLoss, ErrEventLoss},
+		{domain.ErrRegistrationConflict, ErrRegistrationConflict},
+		{domain.ErrInvalidOptions, ErrInvalidOptions},
+	}
+	for index := range pairs {
+		if errors.Is(err, pairs[index][0]) {
+			return pairs[index][publicErrorIndex]
+		}
+	}
+
+	return nil
+}
+
+func errorChildren(err error) []error {
+	var (
+		multiple domain.ErrorChildren
+		single   domain.ErrorUnwrapper
+	)
+
+	switch {
+	case errors.As(err, &multiple):
+		return multiple.Unwrap()
+	case errors.As(err, &single):
+		return []error{single.Unwrap()}
+	default:
+		return nil
+	}
+}
+
+func publicWrappedError(err error) error {
+	children := errorChildren(err)
+	converted := make([]error, len(children))
+	changed := false
+
+	for index := range children {
+		converted[index] = publicError(children[index])
+		changed = changed || !sameError(converted[index], children[index])
+	}
+
+	if !changed {
+		return err
+	}
+
+	return errors.Join(newTranslatedError(err, converted))
+}
+
+func newTranslatedError(err error, converted []error) error {
+	wrapper := new(translatedError)
+
+	wrapper.operations.message = err.Error
+	wrapper.operations.unwrap = func() []error { return slices.Clone(converted) }
+	wrapper.operations.match = func(target error) bool { return originalMatches(err, target) }
+	wrapper.operations.assign = func(target any) bool { return originalAssigns(err, target) }
+
+	return wrapper
+}
+
+func publicControl(control *domain.Control) Control {
+	result := Control{
+		Range: nil, ID: ControlID(control.ID), Name: control.Name,
+		Kind: ControlKind(control.Kind), Usage: Usage(control.Usage),
+		Mapping: MappingSource(control.Mapping), Mode: AxisMode(control.Mode),
+		Unit: Unit(control.Unit), Support: Support(control.Support),
+	}
+	if control.Range != nil {
+		result.Range = &Range{Min: control.Range.Min, Max: control.Range.Max}
+	}
+
+	return result
 }

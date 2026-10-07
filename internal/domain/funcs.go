@@ -9,86 +9,144 @@ import (
 	"slices"
 )
 
+const (
+	hatMaximumOrdinal     = 7
+	hatRangeInclusiveStep = 1
+	normalizedMinimum     = 0
+)
+
 // HID constructs a usage from its standard page and ID.
 func HID(page, id uint16) Usage { return Usage(uint32(page)<<16 | uint32(id)) }
 
-func (u Usage) Page() uint16   { return uint16(uint32(u) >> 16) }
-func (u Usage) ID() uint16     { return uint16(u) }
+// Page returns the HID usage page.
+func (u Usage) Page() uint16 { return uint16(uint32(u) >> 16) }
+
+// ID returns the usage ID within its HID page.
+func (u Usage) ID() uint16 { return uint16(u) }
+
 func (u Usage) String() string { return fmt.Sprintf("%04x:%04x", u.Page(), u.ID()) }
 
 // Normalize explicitly scales a logical absolute axis into [0,1]. It does not
 // infer a centered axis, deadzone, or physical unit. Invalid/null values, relative
 // axes, hats, and unknown or degenerate ranges return false.
-func (c Control) Normalize(value float64) (float64, bool) {
-	if c.Kind != ControlAxis || c.Mode != AxisAbsolute || c.Range == nil ||
-		c.Range.Max <= c.Range.Min || math.IsNaN(value) || math.IsInf(value, 0) {
-
-		return 0, false
+func (c *ControlRecord[R, ID, U, Kind, Mapping, Mode, ValueUnit, Supported]) Normalize(
+	value float64,
+) (float64, bool) {
+	if c.Kind != Kind(ControlAxis) || c.Mode != Mode(AxisAbsolute) {
+		return normalizedMinimum, false
 	}
 
-	lo, hi := float64(c.Range.Min), float64(c.Range.Max)
-	if hi <= lo || value < lo || value > hi {
-		return 0, false
+	return normalizeRecord(c.Range, value)
+}
+
+// Hat decodes conventional four/eight-position HID hats with north at logical
+// minimum. Unsupported encodings remain logical controls in their backend.
+func Hat(value int64, logical Range, hasNull bool) (HatDirection, bool) {
+	count := logical.Max - logical.Min + hatRangeInclusiveStep
+	if !validHatRange(logical) || !validHatCount(count) {
+		return HatNeutral, false
+	}
+
+	if value < logical.Min || value > logical.Max {
+		return HatNeutral, hasNull
+	}
+
+	return HatNorth + HatDirection((value-logical.Min)*(hatEightPositions/count)), true
+}
+
+// CloneInfo copies endpoint metadata and all mutable fields.
+func CloneInfo(source *DeviceInfo) DeviceInfo {
+	return source.Snapshot()
+}
+
+// CloneCapabilities copies controls and their logical ranges.
+func CloneCapabilities(source *Capabilities) Capabilities {
+	return source.Copy()
+}
+
+// Snapshot copies endpoint metadata and all mutable identifier and class fields.
+func (info *DeviceInfoRecord[ID, Class, Medium]) Snapshot() DeviceInfoRecord[ID, Class, Medium] {
+	return DeviceInfoRecord[ID, Class, Medium]{
+		VendorID: clonePointer(info.VendorID), ProductID: clonePointer(info.ProductID),
+		ID: info.ID, Name: info.Name, Path: info.Path, Manufacturer: info.Manufacturer,
+		Serial: info.Serial, Classes: slices.Clone(info.Classes), Transport: info.Transport,
+	}
+}
+
+func cloneValues[C Cloner[C]](source []C) []C {
+	result := slices.Clone(source)
+	for index := range result {
+		result[index] = result[index].Clone()
+	}
+
+	return result
+}
+
+// Error formats operation and device context while retaining the cause's text.
+func (e *OperationError[ID]) Error() string {
+	return operationMessage(e.Op, string(e.DeviceID), e.Err)
+}
+
+// Unwrap returns the underlying cause for errors.Is and errors.As.
+func (e *OperationError[ID]) Unwrap() error { return e.Err }
+
+// Operation reports the failed operation.
+func (e *OperationError[ID]) Operation() string { return e.Op }
+
+// Device reports the affected endpoint, or an empty identifier.
+func (e *OperationError[ID]) Device() ID { return e.DeviceID }
+
+// Bounds returns the inclusive logical limits.
+func (r Range) Bounds() (minimum, maximum int64) { return r.Min, r.Max }
+
+func operationMessage(op, device string, err error) string {
+	if device == "" {
+		return fmt.Sprintf("goinput: %s: %v", op, err)
+	}
+
+	return fmt.Sprintf("goinput: %s %s: %v", op, device, err)
+}
+
+func normalizeRecord[R ~struct{ Min, Max int64 }](
+	logical *R,
+	value float64,
+) (float64, bool) {
+	if logical == nil || !finiteValue(value) {
+		return normalizedMinimum, false
+	}
+
+	minimum, maximum := Range(*logical).Bounds()
+	lo, hi := float64(minimum), float64(maximum)
+
+	if !inFloatRange(value, lo, hi) {
+		return normalizedMinimum, false
 	}
 
 	return (value - lo) / (hi - lo), true
 }
 
-// Hat decodes conventional four/eight-position HID hats with north at logical
-// minimum. Unsupported encodings remain logical controls in their backend.
-func Hat(value, min, max int64, hasNull bool) (HatDirection, bool) {
-	if max < min || max-min > 7 || max-min < 3 {
-		return HatNeutral, false
+func clonePointer[T any](value *T) *T {
+	if value == nil {
+		return nil
 	}
 
-	count := max - min + 1
-	if count != 4 && count != 8 {
-		return HatNeutral, false
-	}
+	copyValue := *value
 
-	if value < min || value > max {
-		return HatNeutral, hasNull
-	}
-
-	return HatDirection((value - min) * (8 / count)), true
+	return &copyValue
 }
 
-func CloneInfo(info DeviceInfo) DeviceInfo {
-	info.Classes = slices.Clone(info.Classes)
-	if info.VendorID != nil {
-		n := *info.VendorID
-
-		info.VendorID = &n
-	}
-
-	if info.ProductID != nil {
-		n := *info.ProductID
-
-		info.ProductID = &n
-	}
-
-	return info
+func finiteValue(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, normalizedMinimum)
 }
 
-func CloneCapabilities(caps Capabilities) Capabilities {
-	caps.Controls = slices.Clone(caps.Controls)
-	for i := range caps.Controls {
-		if caps.Controls[i].Range != nil {
-			r := *caps.Controls[i].Range
-
-			caps.Controls[i].Range = &r
-		}
-	}
-
-	return caps
+func validHatRange(logical Range) bool {
+	return logical.Max >= logical.Min && logical.Max-logical.Min <= hatMaximumOrdinal
 }
 
-func (e *OpError) Error() string {
-	if e.DeviceID == "" {
-		return fmt.Sprintf("goinput: %s: %v", e.Op, e.Err)
-	}
-
-	return fmt.Sprintf("goinput: %s %s: %v", e.Op, e.DeviceID, e.Err)
+func validHatCount(count int64) bool {
+	return count == hatFourPositions || count == hatEightPositions
 }
 
-func (e *OpError) Unwrap() error { return e.Err }
+func inFloatRange(value, low, high float64) bool {
+	return high > low && value >= low && value <= high
+}

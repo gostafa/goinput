@@ -5,21 +5,26 @@ package iokit
 import (
 	"sync"
 	"sync/atomic"
+
+	"github.com/gostafa/goinput/internal/ports"
 )
 
-// Trampolines are allocated once because purego cannot release them. The map
-// holds Go ownership; native callback context never points into Go memory.
-var (
-	callbackRegistry     sync.Map
-	nextCallbackToken    atomic.Uint64
-	symbolOnce           sync.Once
-	symbolErr            error
-	valueCallback        uintptr
-	removalCallback      uintptr
-	machAbsoluteTime     func() uint64
-	machTimebaseInfo     func(*machTimebase) int32
-	registryPath         func(uint32, string, *byte) int32
-	timebase             machTimebase
-	nativeLibraryHandles []uintptr
-	api                  nativeAPI
+type (
+	nativeState struct {
+		api                  nativeAPI
+		symbolErr            error
+		machAbsoluteTime     func() uint64
+		machTimebaseInfo     func(*machTimebase) int32
+		registryPath         func(uint32, string, *byte) int32
+		callbackRegistry     sync.Map
+		nativeLibraryHandles []uintptr
+		nextCallbackToken    atomic.Uint64
+		valueCallback        uintptr
+		removalCallback      uintptr
+		symbolOnce           sync.Once
+		timebase             machTimebase
+	}
 )
+
+// Factory owns native bindings and callback registries for a shared session.
+func Factory() ports.Factory { return new(nativeState).newBackend }

@@ -677,14 +677,14 @@ linters:
         - assign-expr
       disable: []
   exclusions:
-    rules:
-      # Each package consolidates all data declarations into types.go.
-      - path: (^|/)types\.go$
-        text: 'max-public-structs:'
-        linters:
-          - revive
-    paths:
-      - .*_test.go
+    # rules:
+    #   # Each package consolidates all data declarations into types.go.
+    #   - path: (^|/)types\.go$
+    #     text: 'max-public-structs:'
+    #     linters:
+    #       - revive
+    # paths:
+    #   - .*_test.go
     generated: disable
     warn-unused: true
 

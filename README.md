@@ -55,7 +55,8 @@ flowchart TD
     I --> J[Close manager]
 ```
 
-1. Create a manager with `goinput.New(goinput.Options{})`. The default buffer is
+1. Create a reusable system with `system, err := goinput.NewSystem()`, then create
+   managers with `goinput.New(goinput.Options{}, system)`. The default buffer is
    256 events per device; a negative `BufferSize` is invalid. Construction starts
    no native resources. Construct managers through `New`; do not copy them or use
    their zero value.
@@ -76,11 +77,18 @@ Concurrent readers on one device consume a shared queue; they are not separate
 subscriptions. Separate `Open` calls create independent streams. If an application
 needs broadcast delivery, have one reader distribute events to its consumers.
 
-Managers lease a shared native session. The last manager to close shuts it down;
+Managers using the same `System` lease a shared native session. Reuse the system
+across manager lifecycles; it owns the native bindings and callback registry.
+The last manager to close shuts the session down;
 later managers can start another session. If the native event loop fails, close
 all managers leasing that session before constructing a replacement.
 
 ## Event semantics
+
+Use named enum constants when constructing or comparing metadata. Each enum
+category has distinct numeric discriminants; initialize unknown values with its
+corresponding `*Unknown` constant rather than the numeric zero value. HID usage
+and page constants retain their standard numeric values.
 
 | Input | Interpretation |
 | --- | --- |
@@ -88,7 +96,7 @@ all managers leasing that session before constructing a replacement.
 | Absolute axes | Logical positions; `Control.Normalize(value)` returns `[0,1]` only for a valid absolute range |
 | Relative axes | Deltas, not persistent positions |
 | Scrolling | Fractional detents when scaling is known; otherwise counts, indicated by `Control.Unit` |
-| Conventional hats | `HatNeutral` (`-1`) or directions `0..7`, clockwise from north |
+| Conventional hats | `HatNeutral` (`-1`) or directions `16..23`, clockwise from north |
 
 Normalization does not infer a center or deadzone. Unsupported hat encodings stay
 logical axes. Gamepad button ordinals do not guarantee a physical button layout.
@@ -148,6 +156,11 @@ Type-assert a device to `goinput.ExtensionProvider`, then pass a pointer to a
 supported extension struct to `Extension`. Unknown targets return `false`.
 Native binding types remain private.
 
+All metadata providers now expose `NativeInfo()`, including IOHID's
+`iokit.MetadataProvider` (previously `IOKitMetadata()`). Windows native controls
+embed `DescriptorBounds`: existing field selectors still work, while composite
+literals initialize logical and physical limits through that embedded record.
+
 ## Architecture
 
 | Location | Responsibility |
@@ -166,6 +179,11 @@ Keep OS bindings behind adapters and build tags. Keep application logic dependen
 on domain models and ports. Preserve the public API's portable semantics when
 adding backend features. Package files generally group declarations in `types.go`,
 `consts.go`, and `vars.go`, behavior in `funcs.go`, and package docs in `doc.go`.
+
+Public and domain snapshots specialize the same generic records, retaining their
+typed identifiers and enums. Generic operation adapters expose immutable dispatch
+tables over private runtime state; queue, lease, and native-session behavior stays
+in its owning layer. Metadata clones copy mutable slices, pointers, and ranges.
 
 ## Development workflow
 

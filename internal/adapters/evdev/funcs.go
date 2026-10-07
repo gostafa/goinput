@@ -16,12 +16,9 @@ import (
 
 	extension "github.com/gostafa/goinput/extensions/evdev"
 	"github.com/gostafa/goinput/internal/domain"
-	"github.com/gostafa/goinput/internal/platform"
 	"github.com/gostafa/goinput/internal/ports"
 	native "github.com/holoplot/go-evdev"
 )
-
-func init() { platform.Register(newBackend) }
 
 func newBackend(ctx context.Context, retrier ports.Retrier) (ports.Backend, error) {
 	if err := ctx.Err(); err != nil {
@@ -197,8 +194,9 @@ func (b *backend) check(ctx context.Context) error {
 	return nil
 }
 
-func (c *capture) Info() domain.DeviceInfo           { return domain.CloneInfo(c.info) }
-func (c *capture) Capabilities() domain.Capabilities { return domain.CloneCapabilities(c.caps) }
+func (c *capture) Info() domain.DeviceInfo { return domain.CloneInfo(&c.info) }
+
+func (c *capture) Capabilities() domain.Capabilities { return domain.CloneCapabilities(&c.caps) }
 
 func (c *capture) Extension(target any) bool {
 	switch target := target.(type) {
@@ -308,7 +306,7 @@ func (c *capture) dispatch(event *native.InputEvent) bool {
 				}
 				hat.last = value
 				if !c.sink.Publish(
-					domain.Event{
+					&domain.Event{
 						DeviceID:  c.info.ID,
 						ControlID: hat.id,
 						Action:    domain.ActionChange,
@@ -360,7 +358,7 @@ func (c *capture) dispatch(event *native.InputEvent) bool {
 		value /= wheelDetent
 	}
 	return c.sink.Publish(
-		domain.Event{
+		&domain.Event{
 			DeviceID:  c.info.ID,
 			ControlID: control.ID,
 			Action:    action,
@@ -431,8 +429,8 @@ func (c *capture) prepare() {
 			Mapping: domain.MappingInferred,
 			Mode:    domain.AxisAbsolute,
 			Range: &domain.Range{
-				Min: -1,
-				Max: 7,
+				Min: int64(domain.HatNeutral),
+				Max: int64(domain.HatNorthWest),
 			},
 			Unit:    domain.UnitDirection,
 			Support: domain.SupportSupported,
@@ -446,17 +444,25 @@ func (c *capture) prepare() {
 
 func hatValue(x, y int32) int64 {
 	if x < -1 || x > 1 || y < -1 || y > 1 {
-		return -1
+		return int64(domain.HatNeutral)
 	}
-	directions := [3][3]int64{{7, 6, 5}, {0, -1, 4}, {1, 2, 3}}
-	return directions[x+1][y+1]
+	directions := [3][3]domain.HatDirection{
+		{domain.HatNorthWest, domain.HatWest, domain.HatSouthWest},
+		{domain.HatNorth, domain.HatNeutral, domain.HatSouth},
+		{domain.HatNorthEast, domain.HatEast, domain.HatSouthEast},
+	}
+	return int64(directions[x+1][y+1])
 }
 
 func describe(
 	dev *native.InputDevice,
 ) (domain.DeviceInfo, domain.Capabilities, extension.Info, error) {
 	path := dev.Path()
-	info := domain.DeviceInfo{ID: domain.DeviceID(devicePrefix + path), Path: path}
+	info := domain.DeviceInfo{
+		Transport: domain.TransportUnknown,
+		ID:        domain.DeviceID(devicePrefix + path),
+		Path:      path,
+	}
 	name, err := dev.Name()
 	if err != nil {
 		return info, domain.Capabilities{}, extension.Info{}, err
@@ -545,6 +551,11 @@ func controlFor(
 	abs map[native.EvCode]native.AbsInfo,
 ) domain.Control {
 	control := domain.Control{
+		Kind:    domain.ControlUnknown,
+		Mapping: domain.MappingUnknown,
+		Mode:    domain.AxisUnknown,
+		Unit:    domain.UnitUnknown,
+		Usage:   domain.UsageUnknown,
 		ID:      domain.ControlID(fmt.Sprintf("evdev:%d:%d", eventType, code)),
 		Name:    native.CodeName(eventType, code),
 		Support: domain.SupportSupported,
@@ -693,3 +704,6 @@ func keyUsage(code native.EvCode) domain.Usage {
 	}
 	return 0
 }
+
+// Factory returns the native backend constructor.
+func Factory() ports.Factory { return newBackend }

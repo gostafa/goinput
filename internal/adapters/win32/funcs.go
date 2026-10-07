@@ -24,11 +24,8 @@ import (
 	wm "github.com/deploymenttheory/go-bindings-win32/bindings/win32/ui/windowsandmessaging"
 	ext "github.com/gostafa/goinput/extensions/win32"
 	"github.com/gostafa/goinput/internal/domain"
-	"github.com/gostafa/goinput/internal/platform"
 	"github.com/gostafa/goinput/internal/ports"
 )
-
-func init() { platform.Register(newBackend) }
 
 func newBackend(ctx context.Context, retrier ports.Retrier) (ports.Backend, error) {
 	if err := context.Cause(ctx); err != nil {
@@ -312,7 +309,7 @@ func (b *backend) Discover(ctx context.Context) ([]domain.DeviceInfo, error) {
 	devices, err := b.discover(ctx)
 	infos := make([]domain.DeviceInfo, 0, len(devices))
 	for _, d := range devices {
-		infos = append(infos, domain.CloneInfo(d.info))
+		infos = append(infos, domain.CloneInfo(&d.info))
 	}
 	return infos, err
 }
@@ -331,7 +328,7 @@ func (b *backend) discover(ctx context.Context) ([]nativeDevice, error) {
 		}
 		var count uint32
 		size := uint32(unsafe.Sizeof(input.RAWINPUTDEVICELIST{}))
-		if _, err := rawDeviceList(nil, &count, size); err != nil {
+		if err := resultError(rawDeviceList(nil, &count, size)); err != nil {
 			return err
 		}
 		if count > maxDevices {
@@ -415,7 +412,7 @@ func (b *backend) Open(
 	c := &capture{
 		backend: b,
 		device:  d,
-		info:    domain.CloneInfo(d.info),
+		info:    domain.CloneInfo(&d.info),
 		sink:    sink,
 		held: make(
 			map[domain.ControlID]bool,
@@ -461,8 +458,9 @@ func (b *backend) Open(
 	return c, nil
 }
 
-func (c *capture) Info() domain.DeviceInfo           { return domain.CloneInfo(c.info) }
-func (c *capture) Capabilities() domain.Capabilities { return domain.CloneCapabilities(c.caps) }
+func (c *capture) Info() domain.DeviceInfo { return domain.CloneInfo(&c.info) }
+
+func (c *capture) Capabilities() domain.Capabilities { return domain.CloneCapabilities(&c.caps) }
 
 func (c *capture) NativeInfo() ext.Info {
 	info := c.native
@@ -646,12 +644,12 @@ func describeDevice(
 	var info input.RID_DEVICE_INFO
 	info.CbSize = uint32(unsafe.Sizeof(info))
 	size := info.CbSize
-	if _, err := rawDeviceInfo(
+	if err := resultError(rawDeviceInfo(
 		handle,
 		input.RAW_INPUT_DEVICE_INFO_COMMAND(0x2000000b),
 		unsafe.Pointer(&info),
 		&size,
-	); err != nil {
+	)); err != nil {
 		return d, err
 	}
 	words := info.Anonymous.Data
@@ -679,24 +677,24 @@ func describeDevice(
 		return d, domain.ErrUnsupported
 	}
 	var chars uint32
-	if _, err := rawDeviceInfo(
+	if err := resultError(rawDeviceInfo(
 		handle,
 		input.RAW_INPUT_DEVICE_INFO_COMMAND(0x20000007),
 		nil,
 		&chars,
-	); err != nil {
+	)); err != nil {
 		return d, err
 	}
 	if chars == 0 || chars > maxNativeBuffer/2 {
 		return d, domain.ErrNotFound
 	}
 	path := make([]uint16, chars+1)
-	if _, err := rawDeviceInfo(
+	if err := resultError(rawDeviceInfo(
 		handle,
 		input.RAW_INPUT_DEVICE_INFO_COMMAND(0x20000007),
 		unsafe.Pointer(&path[0]),
 		&chars,
-	); err != nil {
+	)); err != nil {
 		return d, err
 	}
 	d.info.Path = syscall.UTF16ToString(path)
@@ -812,6 +810,7 @@ func (c *capture) keyboardCapabilities() {
 	add := func(scan uint16, usage domain.Usage) {
 		id := keyID(usage, scan)
 		controls[id] = domain.Control{
+			Mode:    domain.AxisUnknown,
 			ID:      id,
 			Name:    fmt.Sprintf("Key %04x:%04x", uint16(usage>>16), uint16(usage)),
 			Kind:    domain.ControlKey,
@@ -876,6 +875,7 @@ func (c *capture) mouseCapabilities() {
 			support = domain.SupportSupported
 		}
 		c.caps.Controls = append(c.caps.Controls, domain.Control{
+			Mode:    domain.AxisUnknown,
 			ID:      domain.ControlID(fmt.Sprintf("button:%d", i)),
 			Name:    fmt.Sprintf("Button %d", i),
 			Kind:    domain.ControlButton,
@@ -954,19 +954,19 @@ func (c *capture) hidCapabilities(ctx context.Context) error {
 		}
 		var size uint32
 		command := input.RAW_INPUT_DEVICE_INFO_COMMAND(0x20000005)
-		if _, err := rawDeviceInfo(c.device.handle, command, nil, &size); err != nil {
+		if err := resultError(rawDeviceInfo(c.device.handle, command, nil, &size)); err != nil {
 			return err
 		}
 		if size == 0 || size > maxNativeBuffer {
 			return domain.ErrUnsupported
 		}
 		data := make([]byte, size)
-		if _, err := rawDeviceInfo(
+		if err := resultError(rawDeviceInfo(
 			c.device.handle,
 			command,
 			unsafe.Pointer(&data[0]),
 			&size,
-		); err != nil {
+		)); err != nil {
 			return err
 		}
 		if size > uint32(len(data)) {
@@ -1040,6 +1040,7 @@ func (c *capture) hidCapabilities(ctx context.Context) error {
 					add(hidControl{
 						button: true,
 						control: domain.Control{
+							Mode:    domain.AxisUnknown,
 							ID:      id,
 							Name:    fmt.Sprintf("HID %04x:%04x", button.UsagePage, usage),
 							Kind:    kind,
@@ -1050,15 +1051,14 @@ func (c *capture) hidCapabilities(ctx context.Context) error {
 							Support: support,
 						},
 						native: ext.NativeControl{
-							ID:             string(id),
-							ReportID:       button.ReportID,
-							DataIndex:      uint16(dataIndex),
-							LinkCollection: button.LinkCollection,
-							ReportCount:    button.ReportCount,
-							BitSize:        1,
-							LogicalMin:     0,
-							LogicalMax:     1,
-							Absolute:       button.IsAbsolute != 0,
+							ID:               string(id),
+							ReportID:         button.ReportID,
+							DataIndex:        uint16(dataIndex),
+							LinkCollection:   button.LinkCollection,
+							ReportCount:      button.ReportCount,
+							BitSize:          1,
+							DescriptorBounds: ext.DescriptorBounds{LogicalMin: 0, LogicalMax: 1},
+							Absolute:         button.IsAbsolute != 0,
 						},
 					})
 				}
@@ -1093,6 +1093,7 @@ func (c *capture) hidCapabilities(ctx context.Context) error {
 				for usage, dataIndex := lo, index; usage <= hi && dataIndex <= end; usage, dataIndex = usage+1, dataIndex+1 {
 					id := hidID(value.ReportID, value.LinkCollection, uint16(dataIndex))
 					ctrl := domain.Control{
+						Mode: domain.AxisUnknown,
 						ID:   id,
 						Name: fmt.Sprintf("HID %04x:%04x", value.UsagePage, usage),
 						Kind: domain.ControlAxis,
@@ -1121,8 +1122,8 @@ func (c *capture) hidCapabilities(ctx context.Context) error {
 						conventionalHat(value, minValue, maxValue)
 					if normalHat {
 						ctrl.Kind, ctrl.Unit, ctrl.Range = domain.ControlHat, domain.UnitDirection, &domain.Range{
-							Min: -1,
-							Max: 7,
+							Min: int64(domain.HatNeutral),
+							Max: int64(domain.HatNorthWest),
 						}
 					} else if value.IsAbsolute != 0 && minValue == 0 && maxValue == 1 {
 						ctrl.Kind, ctrl.Unit = domain.ControlSwitch, domain.UnitBoolean
@@ -1134,14 +1135,14 @@ func (c *capture) hidCapabilities(ctx context.Context) error {
 						LinkCollection: value.LinkCollection,
 						BitSize:        value.BitSize,
 						ReportCount:    value.ReportCount,
-						LogicalMin:     value.LogicalMin,
-						LogicalMax:     value.LogicalMax,
-						PhysicalMin:    value.PhysicalMin,
-						PhysicalMax:    value.PhysicalMax,
-						Units:          value.Units,
-						UnitsExponent:  value.UnitsExp,
-						HasNull:        value.HasNull != 0,
-						Absolute:       value.IsAbsolute != 0,
+						DescriptorBounds: ext.DescriptorBounds{
+							LogicalMin: value.LogicalMin, LogicalMax: value.LogicalMax,
+							PhysicalMin: value.PhysicalMin, PhysicalMax: value.PhysicalMax,
+						},
+						Units:         value.Units,
+						UnitsExponent: value.UnitsExp,
+						HasNull:       value.HasNull != 0,
+						Absolute:      value.IsAbsolute != 0,
 					}})
 				}
 			}
@@ -1187,7 +1188,12 @@ func capRange(words [8]uint16, isRange bool) (uint32, uint32, uint32, uint32, er
 }
 
 func conventionalHat(value hid.HIDP_VALUE_CAPS, minValue, maxValue int64) bool {
-	if _, ok := domain.Hat(minValue, minValue, maxValue, value.HasNull != 0); !ok {
+	direction, ok := domain.Hat(
+		minValue,
+		domain.Range{Min: minValue, Max: maxValue},
+		value.HasNull != 0,
+	)
+	if !ok || direction != domain.HatNorth {
 		return false
 	}
 	if value.PhysicalMin != 0 || (value.Units != 0 && value.Units != 0x14) || value.UnitsExp != 0 {
@@ -1296,7 +1302,7 @@ func (c *capture) emit(
 ) {
 	if !c.closed.Load() &&
 		!c.sink.Publish(
-			domain.Event{
+			&domain.Event{
 				DeviceID:  c.info.ID,
 				ControlID: id,
 				Action:    action,
@@ -1486,7 +1492,11 @@ func (c *capture) report(report []byte, stamp domain.Timestamp) {
 			maxValue = int64(uint32(ctrl.native.LogicalMax))
 		}
 		if ctrl.hat {
-			direction, ok := domain.Hat(value, minValue, maxValue, ctrl.native.HasNull)
+			direction, ok := domain.Hat(
+				value,
+				domain.Range{Min: minValue, Max: maxValue},
+				ctrl.native.HasNull,
+			)
 			if !ok {
 				continue
 			}
@@ -1532,3 +1542,6 @@ func logicalValue(word uint32, bits uint16, signed bool) int64 {
 	}
 	return int64(value)
 }
+
+// Factory returns the native backend constructor.
+func Factory() ports.Factory { return newBackend }

@@ -3,5 +3,14 @@
 
 package backoff
 
-// Retrier implements the application retry port with fixed discovery defaults.
-type Retrier struct{}
+import (
+	"context"
+
+	"github.com/gostafa/goinput/internal/domain"
+)
+
+type (
+	// Retrier implements the application retry port with fixed discovery defaults.
+	Retrier   interface{ domain.Retrier }
+	retryFunc func(context.Context, func(context.Context) error, func(error) bool) error
+)
