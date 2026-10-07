@@ -27,7 +27,11 @@ func newBackend(ctx context.Context, retrier ports.Retrier) (ports.Backend, erro
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return &backend{captures: make(map[*capture]struct{}), retrier: retrier, closeDone: make(chan struct{})}, nil
+	return &backend{
+		captures:  make(map[*capture]struct{}),
+		retrier:   retrier,
+		closeDone: make(chan struct{}),
+	}, nil
 }
 
 func (b *backend) Discover(ctx context.Context) ([]domain.DeviceInfo, error) {
@@ -70,7 +74,10 @@ func (b *backend) Discover(ctx context.Context) ([]domain.DeviceInfo, error) {
 			if errors.Is(openErr, os.ErrNotExist) || errors.Is(openErr, syscall.ENODEV) {
 				continue
 			}
-			diagnostics = append(diagnostics, operationError("discover", domain.DeviceID(devicePrefix+path), openErr))
+			diagnostics = append(
+				diagnostics,
+				operationError("discover", domain.DeviceID(devicePrefix+path), openErr),
+			)
 			continue
 		}
 		info, _, _, describeErr := describe(dev)
@@ -79,7 +86,10 @@ func (b *backend) Discover(ctx context.Context) ([]domain.DeviceInfo, error) {
 			if errors.Is(describeErr, syscall.ENODEV) || errors.Is(describeErr, os.ErrNotExist) {
 				continue
 			}
-			diagnostics = append(diagnostics, operationError("discover", domain.DeviceID(devicePrefix+path), describeErr))
+			diagnostics = append(
+				diagnostics,
+				operationError("discover", domain.DeviceID(devicePrefix+path), describeErr),
+			)
 			continue
 		}
 		infos = append(infos, info)
@@ -90,12 +100,17 @@ func (b *backend) Discover(ctx context.Context) ([]domain.DeviceInfo, error) {
 	return infos, errors.Join(diagnostics...)
 }
 
-func (b *backend) Open(ctx context.Context, id domain.DeviceID, sink ports.EventSink) (ports.Capture, error) {
+func (b *backend) Open(
+	ctx context.Context,
+	id domain.DeviceID,
+	sink ports.EventSink,
+) (ports.Capture, error) {
 	if err := b.check(ctx); err != nil {
 		return nil, err
 	}
 	path, valid := strings.CutPrefix(string(id), devicePrefix)
-	if !valid || filepath.Dir(path) != inputDirectory || !strings.HasPrefix(filepath.Base(path), "event") {
+	if !valid || filepath.Dir(path) != inputDirectory ||
+		!strings.HasPrefix(filepath.Base(path), "event") {
 		return nil, operationError("open", id, domain.ErrNotFound)
 	}
 	dev, err := native.OpenWithFlags(path, os.O_RDONLY)
@@ -107,9 +122,22 @@ func (b *backend) Open(ctx context.Context, id domain.DeviceID, sink ports.Event
 		_ = dev.Close()
 		return nil, operationError("open", id, err)
 	}
-	c := &capture{owner: b, device: dev, sink: sink, info: info, caps: caps, native: details,
-		controls: make(map[eventCode]domain.Control), hats: make(map[int]*hat), hatCodes: make(map[eventCode]int),
-		suppressed: make(map[eventCode]bool), stop: make(chan struct{}), done: make(chan struct{})}
+	c := &capture{
+		owner:  b,
+		device: dev,
+		sink:   sink,
+		info:   info,
+		caps:   caps,
+		native: details,
+		controls: make(
+			map[eventCode]domain.Control,
+		),
+		hats:       make(map[int]*hat),
+		hatCodes:   make(map[eventCode]int),
+		suppressed: make(map[eventCode]bool),
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
+	}
 	c.prepare()
 	// Metadata ioctls must precede NonBlock: upstream Fd() calls otherwise
 	// restore blocking mode and prevent Close from interrupting a pending read.
@@ -253,7 +281,11 @@ func (c *capture) read() {
 
 func (c *capture) dispatch(event *native.InputEvent) bool {
 	received := time.Now()
-	timestamp := domain.Timestamp{Time: time.Unix(int64(event.Time.Sec), int64(event.Time.Usec)*1000).UTC(), ReceivedAt: received, Source: domain.TimestampNative}
+	timestamp := domain.Timestamp{
+		Time:       time.Unix(int64(event.Time.Sec), int64(event.Time.Usec)*1000).UTC(),
+		ReceivedAt: received,
+		Source:     domain.TimestampNative,
+	}
 	if event.Type == native.EV_SYN {
 		switch event.Code {
 		case native.SYN_DROPPED:
@@ -275,7 +307,15 @@ func (c *capture) dispatch(event *native.InputEvent) bool {
 					continue
 				}
 				hat.last = value
-				if !c.sink.Publish(domain.Event{DeviceID: c.info.ID, ControlID: hat.id, Action: domain.ActionChange, Value: float64(value), Timestamp: timestamp}) {
+				if !c.sink.Publish(
+					domain.Event{
+						DeviceID:  c.info.ID,
+						ControlID: hat.id,
+						Action:    domain.ActionChange,
+						Value:     float64(value),
+						Timestamp: timestamp,
+					},
+				) {
 					return false
 				}
 			}
@@ -315,10 +355,19 @@ func (c *capture) dispatch(event *native.InputEvent) bool {
 			return true
 		}
 	}
-	if event.Type == native.EV_REL && (event.Code == native.REL_WHEEL_HI_RES || event.Code == native.REL_HWHEEL_HI_RES) {
+	if event.Type == native.EV_REL &&
+		(event.Code == native.REL_WHEEL_HI_RES || event.Code == native.REL_HWHEEL_HI_RES) {
 		value /= wheelDetent
 	}
-	return c.sink.Publish(domain.Event{DeviceID: c.info.ID, ControlID: control.ID, Action: action, Value: value, Timestamp: timestamp})
+	return c.sink.Publish(
+		domain.Event{
+			DeviceID:  c.info.ID,
+			ControlID: control.ID,
+			Action:    action,
+			Value:     value,
+			Timestamp: timestamp,
+		},
+	)
 }
 
 func (c *capture) prepare() {
@@ -349,7 +398,8 @@ func (c *capture) prepare() {
 		yCode := xCode + 1
 		x, hasX := c.native.Axes[xCode]
 		y, hasY := c.native.Axes[yCode]
-		if !hasX || !hasY || x.Minimum != -1 || x.Maximum != 1 || y.Minimum != -1 || y.Maximum != 1 {
+		if !hasX || !hasY || x.Minimum != -1 || x.Maximum != 1 || y.Minimum != -1 ||
+			y.Maximum != 1 {
 			continue
 		}
 		id := domain.ControlID(fmt.Sprintf("evdev:hat:%d", index))
@@ -370,11 +420,28 @@ func (c *capture) prepare() {
 		c.caps.Controls = append(c.caps.Controls, control)
 	}
 	for index, hat := range c.hats {
-		c.caps.Controls = append(c.caps.Controls, domain.Control{ID: hat.id, Name: fmt.Sprintf("Hat %d", index), Kind: domain.ControlHat,
-			Usage: domain.HID(desktopPage, 0x39), Mapping: domain.MappingInferred, Mode: domain.AxisAbsolute,
-			Range: &domain.Range{Min: -1, Max: 7}, Unit: domain.UnitDirection, Support: domain.SupportSupported})
+		c.caps.Controls = append(c.caps.Controls, domain.Control{
+			ID:   hat.id,
+			Name: fmt.Sprintf("Hat %d", index),
+			Kind: domain.ControlHat,
+			Usage: domain.HID(
+				desktopPage,
+				0x39,
+			),
+			Mapping: domain.MappingInferred,
+			Mode:    domain.AxisAbsolute,
+			Range: &domain.Range{
+				Min: -1,
+				Max: 7,
+			},
+			Unit:    domain.UnitDirection,
+			Support: domain.SupportSupported,
+		})
 	}
-	sort.Slice(c.caps.Controls, func(i, j int) bool { return c.caps.Controls[i].ID < c.caps.Controls[j].ID })
+	sort.Slice(
+		c.caps.Controls,
+		func(i, j int) bool { return c.caps.Controls[i].ID < c.caps.Controls[j].ID },
+	)
 }
 
 func hatValue(x, y int32) int64 {
@@ -385,7 +452,9 @@ func hatValue(x, y int32) int64 {
 	return directions[x+1][y+1]
 }
 
-func describe(dev *native.InputDevice) (domain.DeviceInfo, domain.Capabilities, extension.Info, error) {
+func describe(
+	dev *native.InputDevice,
+) (domain.DeviceInfo, domain.Capabilities, extension.Info, error) {
 	path := dev.Path()
 	info := domain.DeviceInfo{ID: domain.DeviceID(devicePrefix + path), Path: path}
 	name, err := dev.Name()
@@ -400,7 +469,11 @@ func describe(dev *native.InputDevice) (domain.DeviceInfo, domain.Capabilities, 
 	info.VendorID, info.ProductID = &id.Vendor, &id.Product
 	info.Transport = transport(id.BusType)
 	info.Serial, _ = dev.UniqueID()
-	details := extension.Info{BusType: id.BusType, Version: id.Version, Axes: make(map[uint16]extension.AxisInfo)}
+	details := extension.Info{
+		BusType: id.BusType,
+		Version: id.Version,
+		Axes:    make(map[uint16]extension.AxisInfo),
+	}
 	details.PhysicalLocation, _ = dev.PhysicalLocation()
 	for _, property := range dev.Properties() {
 		details.Properties = append(details.Properties, uint16(property))
@@ -410,7 +483,14 @@ func describe(dev *native.InputDevice) (domain.DeviceInfo, domain.Capabilities, 
 		return info, domain.Capabilities{}, details, err
 	}
 	for code, axis := range abs {
-		details.Axes[uint16(code)] = extension.AxisInfo{Value: axis.Value, Minimum: axis.Minimum, Maximum: axis.Maximum, Fuzz: axis.Fuzz, Flat: axis.Flat, Resolution: axis.Resolution}
+		details.Axes[uint16(code)] = extension.AxisInfo{
+			Value:      axis.Value,
+			Minimum:    axis.Minimum,
+			Maximum:    axis.Maximum,
+			Fuzz:       axis.Fuzz,
+			Flat:       axis.Flat,
+			Resolution: axis.Resolution,
+		}
 	}
 	// Upstream capability queries suppress errors, so completeness cannot be
 	// established even when the returned schema appears complete.
@@ -420,7 +500,10 @@ func describe(dev *native.InputDevice) (domain.DeviceInfo, domain.Capabilities, 
 		if eventType == native.EV_REP {
 			caps.Repeat = domain.SupportSupported
 		}
-		if eventType != native.EV_KEY && eventType != native.EV_REL && eventType != native.EV_ABS && eventType != native.EV_SW && eventType != native.EV_MSC && eventType != native.EV_FF_STATUS {
+		if eventType != native.EV_KEY && eventType != native.EV_REL && eventType != native.EV_ABS &&
+			eventType != native.EV_SW &&
+			eventType != native.EV_MSC &&
+			eventType != native.EV_FF_STATUS {
 			continue
 		}
 		for _, code := range dev.CapableEvents(eventType) {
@@ -429,7 +512,14 @@ func describe(dev *native.InputDevice) (domain.DeviceInfo, domain.Capabilities, 
 			}
 			control := controlFor(eventType, code, abs)
 			caps.Controls = append(caps.Controls, control)
-			details.Controls = append(details.Controls, extension.NativeControl{ID: string(control.ID), Type: uint16(eventType), Code: uint16(code)})
+			details.Controls = append(
+				details.Controls,
+				extension.NativeControl{
+					ID:   string(control.ID),
+					Type: uint16(eventType),
+					Code: uint16(code),
+				},
+			)
 		}
 	}
 	if keys[native.KEY_A] || keys[native.KEY_ENTER] || keys[native.KEY_SPACE] {
@@ -449,11 +539,22 @@ func describe(dev *native.InputDevice) (domain.DeviceInfo, domain.Capabilities, 
 	return info, caps, details, nil
 }
 
-func controlFor(eventType native.EvType, code native.EvCode, abs map[native.EvCode]native.AbsInfo) domain.Control {
-	control := domain.Control{ID: domain.ControlID(fmt.Sprintf("evdev:%d:%d", eventType, code)), Name: native.CodeName(eventType, code), Support: domain.SupportSupported}
+func controlFor(
+	eventType native.EvType,
+	code native.EvCode,
+	abs map[native.EvCode]native.AbsInfo,
+) domain.Control {
+	control := domain.Control{
+		ID:      domain.ControlID(fmt.Sprintf("evdev:%d:%d", eventType, code)),
+		Name:    native.CodeName(eventType, code),
+		Support: domain.SupportSupported,
+	}
 	switch eventType {
 	case native.EV_KEY:
-		control.Kind, control.Unit, control.Range = domain.ControlKey, domain.UnitBoolean, &domain.Range{Min: 0, Max: 1}
+		control.Kind, control.Unit, control.Range = domain.ControlKey, domain.UnitBoolean, &domain.Range{
+			Min: 0,
+			Max: 1,
+		}
 		if strings.HasPrefix(control.Name, "BTN_") {
 			control.Kind = domain.ControlButton
 		}
@@ -461,7 +562,9 @@ func controlFor(eventType native.EvType, code native.EvCode, abs map[native.EvCo
 	case native.EV_REL:
 		control.Kind, control.Mode, control.Unit = domain.ControlAxis, domain.AxisRelative, domain.UnitCounts
 		control.Usage = axisUsage(code, true)
-		if code == native.REL_WHEEL || code == native.REL_HWHEEL || code == native.REL_WHEEL_HI_RES || code == native.REL_HWHEEL_HI_RES {
+		if code == native.REL_WHEEL || code == native.REL_HWHEEL ||
+			code == native.REL_WHEEL_HI_RES ||
+			code == native.REL_HWHEEL_HI_RES {
 			control.Unit = domain.UnitDetents
 		}
 	case native.EV_ABS:
@@ -471,7 +574,10 @@ func controlFor(eventType native.EvType, code native.EvCode, abs map[native.EvCo
 			control.Range = &domain.Range{Min: int64(axis.Minimum), Max: int64(axis.Maximum)}
 		}
 	case native.EV_SW:
-		control.Kind, control.Unit, control.Range = domain.ControlSwitch, domain.UnitBoolean, &domain.Range{Min: 0, Max: 1}
+		control.Kind, control.Unit, control.Range = domain.ControlSwitch, domain.UnitBoolean, &domain.Range{
+			Min: 0,
+			Max: 1,
+		}
 	default:
 		control.Kind, control.Support = domain.ControlUnknown, domain.SupportUnsupported
 	}

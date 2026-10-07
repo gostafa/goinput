@@ -1,3 +1,4 @@
-// Package ports defines the application-owned boundaries implemented by adapters.
-// No native binding, singleton, or retry-engine types cross these interfaces.
+// Gostafa 2026.
+// SPDX-License-Identifier: Apache-2.0.
+
 package ports

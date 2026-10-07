@@ -1,3 +1,6 @@
+// Gostafa 2026.
+// SPDX-License-Identifier: Apache-2.0.
+
 package evdev
 
 // Metadata provides information that has no universal input-device equivalent.
@@ -7,12 +10,12 @@ type Metadata interface {
 
 // Info describes an evdev endpoint without exposing its native file descriptor.
 type Info struct {
+	Axes             map[uint16]AxisInfo
 	PhysicalLocation string
-	BusType          uint16
-	Version          uint16
 	Properties       []uint16
 	Controls         []NativeControl
-	Axes             map[uint16]AxisInfo
+	BusType          uint16
+	Version          uint16
 }
 
 // NativeControl associates a device-local control with Linux event codes.

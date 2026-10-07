@@ -78,7 +78,11 @@ func (b *backend) run() {
 		return
 	}
 	b.className = fmt.Sprintf("goinput.rawinput.%d", classNumber.Add(1))
-	class := wm.WNDCLASSW{LpfnWndProc: wm.WNDPROC(callbackAddr), HInstance: foundation.HINSTANCE(instance), LpszClassName: native.UTF16Ptr(b.className)}
+	class := wm.WNDCLASSW{
+		LpfnWndProc:   wm.WNDPROC(callbackAddr),
+		HInstance:     foundation.HINSTANCE(instance),
+		LpszClassName: native.UTF16Ptr(b.className),
+	}
 	atom, err := wm.RegisterClass(&class)
 	if atom == 0 {
 		// The generated wrapper checks GetLastError even on success; the atom
@@ -88,7 +92,20 @@ func (b *backend) run() {
 		b.ready <- runErr
 		return
 	}
-	window, err := wm.CreateWindowEx(0, &b.className, nil, 0, 0, 0, 0, 0, wm.HWND_MESSAGE, 0, foundation.HINSTANCE(instance), nil)
+	window, err := wm.CreateWindowEx(
+		0,
+		&b.className,
+		nil,
+		0,
+		0,
+		0,
+		0,
+		0,
+		wm.HWND_MESSAGE,
+		0,
+		foundation.HINSTANCE(instance),
+		nil,
+	)
 	if err != nil {
 		runErr = normalizeError(err)
 		b.ready <- runErr
@@ -103,7 +120,14 @@ func (b *backend) run() {
 	for !b.stopping {
 		// A kernel event wakes Close even when message posting fails. PeekMessage
 		// also avoids the generated GetMessage wrapper's incorrect tri-state API.
-		ret, _, errno := syscall.SyscallN(wm.Procs.MsgWaitForMultipleObjectsEx.Addr(), 1, uintptr(unsafe.Pointer(&handles[0])), 0xffffffff, 0x04ff, 0x04)
+		ret, _, errno := syscall.SyscallN(
+			wm.Procs.MsgWaitForMultipleObjectsEx.Addr(),
+			1,
+			uintptr(unsafe.Pointer(&handles[0])),
+			0xffffffff,
+			0x04ff,
+			0x04,
+		)
 		if uint32(ret) == maxUint32 {
 			runErr = normalizeError(native.LastError(errno))
 			return
@@ -122,7 +146,12 @@ func (b *backend) run() {
 	}
 }
 
-func windowProc(hwnd foundation.HWND, message uint32, wParam foundation.WPARAM, lParam foundation.LPARAM) foundation.LRESULT {
+func windowProc(
+	hwnd foundation.HWND,
+	message uint32,
+	wParam foundation.WPARAM,
+	lParam foundation.LPARAM,
+) foundation.LRESULT {
 	if value, ok := windows.Load(hwnd); ok {
 		b := value.(*backend)
 		switch message {
@@ -247,7 +276,10 @@ func (b *backend) finish(cause error) {
 	}
 	if b.className != "" {
 		instance, _ := libraryloader.GetModuleHandle(nil)
-		cleanupErr = errors.Join(cleanupErr, wm.UnregisterClass(b.className, foundation.HINSTANCE(instance)))
+		cleanupErr = errors.Join(
+			cleanupErr,
+			wm.UnregisterClass(b.className, foundation.HINSTANCE(instance)),
+		)
 	}
 	b.mu.Lock()
 	if b.wakeEvent != 0 {
@@ -358,7 +390,11 @@ func (b *backend) discover(ctx context.Context) ([]nativeDevice, error) {
 	return devices, errors.Join(diagnostics, context.Cause(ctx))
 }
 
-func (b *backend) Open(ctx context.Context, id domain.DeviceID, sink ports.EventSink) (ports.Capture, error) {
+func (b *backend) Open(
+	ctx context.Context,
+	id domain.DeviceID,
+	sink ports.EventSink,
+) (ports.Capture, error) {
 	discovery, cancel := context.WithTimeout(ctx, ports.DiscoveryBudget)
 	devices, err := b.discover(discovery)
 	cancel()
@@ -376,9 +412,24 @@ func (b *backend) Open(ctx context.Context, id domain.DeviceID, sink ports.Event
 	if !found {
 		return nil, errors.Join(domain.ErrNotFound, err)
 	}
-	c := &capture{backend: b, device: d, info: domain.CloneInfo(d.info), sink: sink,
-		held: make(map[domain.ControlID]bool), values: make(map[domain.ControlID]int64), buttons: make(map[byte]map[domain.ControlID]bool),
-		native: ext.Info{RawInputHandle: uintptr(d.handle), DeviceType: d.kind, UsagePage: d.tlc.page, Usage: d.tlc.usage, Version: d.version}}
+	c := &capture{
+		backend: b,
+		device:  d,
+		info:    domain.CloneInfo(d.info),
+		sink:    sink,
+		held: make(
+			map[domain.ControlID]bool,
+		),
+		values:  make(map[domain.ControlID]int64),
+		buttons: make(map[byte]map[domain.ControlID]bool),
+		native: ext.Info{
+			RawInputHandle: uintptr(d.handle),
+			DeviceType:     d.kind,
+			UsagePage:      d.tlc.page,
+			Usage:          d.tlc.usage,
+			Version:        d.version,
+		},
+	}
 	switch d.kind {
 	case deviceKeyboard:
 		c.keyboardCapabilities()
@@ -462,7 +513,8 @@ func (b *backend) acquireRegistration(usage topLevel) error {
 	}
 	for _, r := range list {
 		pageOnly := uint32(r.DwFlags)&0x30 == 0x20
-		if r.UsUsagePage == usage.page && (r.UsUsage == usage.usage || pageOnly) && r.HwndTarget != b.hwnd {
+		if r.UsUsagePage == usage.page && (r.UsUsage == usage.usage || pageOnly) &&
+			r.HwndTarget != b.hwnd {
 			return domain.ErrRegistrationConflict
 		}
 	}
@@ -470,7 +522,17 @@ func (b *backend) acquireRegistration(usage topLevel) error {
 		b.registrations[usage]++
 		return nil
 	}
-	err = input.RegisterRawInputDevices([]input.RAWINPUTDEVICE{{UsUsagePage: usage.page, UsUsage: usage.usage, DwFlags: input.RAWINPUTDEVICE_FLAGS(registrationFlags), HwndTarget: b.hwnd}}, uint32(unsafe.Sizeof(input.RAWINPUTDEVICE{})))
+	err = input.RegisterRawInputDevices(
+		[]input.RAWINPUTDEVICE{
+			{
+				UsUsagePage: usage.page,
+				UsUsage:     usage.usage,
+				DwFlags:     input.RAWINPUTDEVICE_FLAGS(registrationFlags),
+				HwndTarget:  b.hwnd,
+			},
+		},
+		uint32(unsafe.Sizeof(input.RAWINPUTDEVICE{})),
+	)
 	if err != nil {
 		return err
 	}
@@ -504,7 +566,16 @@ func (b *backend) removeRegistration(usage topLevel) error {
 			if r.HwndTarget != b.hwnd {
 				return domain.ErrRegistrationConflict // never remove another window's registration
 			}
-			return input.RegisterRawInputDevices([]input.RAWINPUTDEVICE{{UsUsagePage: usage.page, UsUsage: usage.usage, DwFlags: input.RAWINPUTDEVICE_FLAGS(registrationRemove)}}, uint32(unsafe.Sizeof(input.RAWINPUTDEVICE{})))
+			return input.RegisterRawInputDevices(
+				[]input.RAWINPUTDEVICE{
+					{
+						UsUsagePage: usage.page,
+						UsUsage:     usage.usage,
+						DwFlags:     input.RAWINPUTDEVICE_FLAGS(registrationRemove),
+					},
+				},
+				uint32(unsafe.Sizeof(input.RAWINPUTDEVICE{})),
+			)
 		}
 	}
 	return nil
@@ -553,7 +624,12 @@ func rawDeviceList(list *input.RAWINPUTDEVICELIST, count *uint32, size uint32) (
 	return n, nil
 }
 
-func rawDeviceInfo(handle foundation.HANDLE, command input.RAW_INPUT_DEVICE_INFO_COMMAND, data unsafe.Pointer, size *uint32) (uint32, error) {
+func rawDeviceInfo(
+	handle foundation.HANDLE,
+	command input.RAW_INPUT_DEVICE_INFO_COMMAND,
+	data unsafe.Pointer,
+	size *uint32,
+) (uint32, error) {
 	n, err := input.GetRawInputDeviceInfo(handle, command, data, size)
 	if n == maxUint32 {
 		return n, nonzeroError(err)
@@ -561,12 +637,21 @@ func rawDeviceInfo(handle foundation.HANDLE, command input.RAW_INPUT_DEVICE_INFO
 	return n, nil
 }
 
-func describeDevice(ctx context.Context, handle foundation.HANDLE, kind uint32) (nativeDevice, error) {
+func describeDevice(
+	ctx context.Context,
+	handle foundation.HANDLE,
+	kind uint32,
+) (nativeDevice, error) {
 	d := nativeDevice{handle: handle, kind: kind}
 	var info input.RID_DEVICE_INFO
 	info.CbSize = uint32(unsafe.Sizeof(info))
 	size := info.CbSize
-	if _, err := rawDeviceInfo(handle, input.RAW_INPUT_DEVICE_INFO_COMMAND(0x2000000b), unsafe.Pointer(&info), &size); err != nil {
+	if _, err := rawDeviceInfo(
+		handle,
+		input.RAW_INPUT_DEVICE_INFO_COMMAND(0x2000000b),
+		unsafe.Pointer(&info),
+		&size,
+	); err != nil {
 		return d, err
 	}
 	words := info.Anonymous.Data
@@ -594,14 +679,24 @@ func describeDevice(ctx context.Context, handle foundation.HANDLE, kind uint32) 
 		return d, domain.ErrUnsupported
 	}
 	var chars uint32
-	if _, err := rawDeviceInfo(handle, input.RAW_INPUT_DEVICE_INFO_COMMAND(0x20000007), nil, &chars); err != nil {
+	if _, err := rawDeviceInfo(
+		handle,
+		input.RAW_INPUT_DEVICE_INFO_COMMAND(0x20000007),
+		nil,
+		&chars,
+	); err != nil {
 		return d, err
 	}
 	if chars == 0 || chars > maxNativeBuffer/2 {
 		return d, domain.ErrNotFound
 	}
 	path := make([]uint16, chars+1)
-	if _, err := rawDeviceInfo(handle, input.RAW_INPUT_DEVICE_INFO_COMMAND(0x20000007), unsafe.Pointer(&path[0]), &chars); err != nil {
+	if _, err := rawDeviceInfo(
+		handle,
+		input.RAW_INPUT_DEVICE_INFO_COMMAND(0x20000007),
+		unsafe.Pointer(&path[0]),
+		&chars,
+	); err != nil {
 		return d, err
 	}
 	d.info.Path = syscall.UTF16ToString(path)
@@ -623,7 +718,15 @@ func enrichIdentity(d *nativeDevice) {
 		}
 	}
 	// DesiredAccess=0 avoids stealing keyboard/mouse read access from the OS.
-	handle, err := filesystem.CreateFile(d.info.Path, 0, filesystem.FILE_SHARE_MODE(3), nil, filesystem.FILE_CREATION_DISPOSITION(3), 0, 0)
+	handle, err := filesystem.CreateFile(
+		d.info.Path,
+		0,
+		filesystem.FILE_SHARE_MODE(3),
+		nil,
+		filesystem.FILE_CREATION_DISPOSITION(3),
+		0,
+		0,
+	)
 	if err != nil {
 		return // optional product/manufacturer/serial metadata
 	}
@@ -677,7 +780,8 @@ func nonzeroError(err error) error {
 }
 
 func transient(err error) bool {
-	return errors.Is(err, syscall.Errno(122)) || errors.Is(err, syscall.Errno(234)) || errors.Is(err, syscall.Errno(21))
+	return errors.Is(err, syscall.Errno(122)) || errors.Is(err, syscall.Errno(234)) ||
+		errors.Is(err, syscall.Errno(21))
 }
 
 func normalizeError(err error) error {
@@ -688,7 +792,9 @@ func normalizeError(err error) error {
 	switch {
 	case errors.Is(err, syscall.Errno(5)), errors.Is(err, syscall.Errno(32)):
 		category = domain.ErrPermissionDenied
-	case errors.Is(err, syscall.Errno(2)), errors.Is(err, syscall.Errno(3)), errors.Is(err, syscall.Errno(6)):
+	case errors.Is(err, syscall.Errno(2)),
+		errors.Is(err, syscall.Errno(3)),
+		errors.Is(err, syscall.Errno(6)):
 		category = domain.ErrNotFound
 	case errors.Is(err, syscall.Errno(1167)):
 		category = domain.ErrDisconnected
@@ -705,8 +811,16 @@ func (c *capture) keyboardCapabilities() {
 	controls := make(map[domain.ControlID]domain.Control)
 	add := func(scan uint16, usage domain.Usage) {
 		id := keyID(usage, scan)
-		controls[id] = domain.Control{ID: id, Name: fmt.Sprintf("Key %04x:%04x", uint16(usage>>16), uint16(usage)), Kind: domain.ControlKey,
-			Usage: usage, Mapping: domain.MappingInferred, Range: &domain.Range{Min: 0, Max: 1}, Unit: domain.UnitBoolean, Support: domain.SupportUnknown}
+		controls[id] = domain.Control{
+			ID:      id,
+			Name:    fmt.Sprintf("Key %04x:%04x", uint16(usage>>16), uint16(usage)),
+			Kind:    domain.ControlKey,
+			Usage:   usage,
+			Mapping: domain.MappingInferred,
+			Range:   &domain.Range{Min: 0, Max: 1},
+			Unit:    domain.UnitBoolean,
+			Support: domain.SupportUnknown,
+		}
 		control := ext.NativeControl{ID: string(id), ScanCode: scan}
 		if scan&0xff00 == 0xff00 {
 			control.ScanCode, control.VirtualKey = 0, scan&0xff
@@ -729,7 +843,10 @@ func (c *capture) keyboardCapabilities() {
 		c.caps.Controls = append(c.caps.Controls, control)
 	}
 	c.caps.Repeat = domain.SupportSupported
-	sort.Slice(c.caps.Controls, func(i, j int) bool { return c.caps.Controls[i].ID < c.caps.Controls[j].ID })
+	sort.Slice(
+		c.caps.Controls,
+		func(i, j int) bool { return c.caps.Controls[i].ID < c.caps.Controls[j].ID },
+	)
 	sort.Slice(c.native.Controls, func(i, j int) bool {
 		if c.native.Controls[i].ID == c.native.Controls[j].ID {
 			return c.native.Controls[i].ScanCode < c.native.Controls[j].ScanCode
@@ -758,19 +875,68 @@ func (c *capture) mouseCapabilities() {
 		if uint32(i) <= c.device.buttons {
 			support = domain.SupportSupported
 		}
-		c.caps.Controls = append(c.caps.Controls, domain.Control{ID: domain.ControlID(fmt.Sprintf("button:%d", i)), Name: fmt.Sprintf("Button %d", i),
-			Kind: domain.ControlButton, Usage: domain.HID(9, i), Mapping: domain.MappingInferred, Range: &domain.Range{Min: 0, Max: 1}, Unit: domain.UnitBoolean, Support: support})
+		c.caps.Controls = append(c.caps.Controls, domain.Control{
+			ID:      domain.ControlID(fmt.Sprintf("button:%d", i)),
+			Name:    fmt.Sprintf("Button %d", i),
+			Kind:    domain.ControlButton,
+			Usage:   domain.HID(9, i),
+			Mapping: domain.MappingInferred,
+			Range:   &domain.Range{Min: 0, Max: 1},
+			Unit:    domain.UnitBoolean,
+			Support: support,
+		})
 	}
 	for i, axis := range []string{"x", "y"} {
 		c.caps.Controls = append(c.caps.Controls,
-			domain.Control{ID: domain.ControlID("rel:" + axis), Name: "Relative " + strings.ToUpper(axis), Kind: domain.ControlAxis, Usage: domain.HID(1, uint16(0x30+i)),
-				Mapping: domain.MappingInferred, Mode: domain.AxisRelative, Unit: domain.UnitCounts, Support: domain.SupportUnknown},
-			domain.Control{ID: domain.ControlID("abs:" + axis), Name: "Absolute " + strings.ToUpper(axis), Kind: domain.ControlAxis, Usage: domain.HID(1, uint16(0x30+i)),
-				Mapping: domain.MappingInferred, Mode: domain.AxisAbsolute, Range: &domain.Range{Min: 0, Max: 65535}, Unit: domain.UnitLogical, Support: domain.SupportUnknown})
+			domain.Control{
+				ID: domain.ControlID(
+					"rel:" + axis,
+				),
+				Name:    "Relative " + strings.ToUpper(axis),
+				Kind:    domain.ControlAxis,
+				Usage:   domain.HID(1, uint16(0x30+i)),
+				Mapping: domain.MappingInferred,
+				Mode:    domain.AxisRelative,
+				Unit:    domain.UnitCounts,
+				Support: domain.SupportUnknown,
+			},
+			domain.Control{
+				ID: domain.ControlID(
+					"abs:" + axis,
+				),
+				Name:    "Absolute " + strings.ToUpper(axis),
+				Kind:    domain.ControlAxis,
+				Usage:   domain.HID(1, uint16(0x30+i)),
+				Mapping: domain.MappingInferred,
+				Mode:    domain.AxisAbsolute,
+				Range:   &domain.Range{Min: 0, Max: 65535},
+				Unit:    domain.UnitLogical,
+				Support: domain.SupportUnknown,
+			})
 	}
-	c.caps.Controls = append(c.caps.Controls,
-		domain.Control{ID: "wheel", Name: "Wheel", Kind: domain.ControlAxis, Usage: domain.HID(1, 0x38), Mapping: domain.MappingInferred, Mode: domain.AxisRelative, Unit: domain.UnitDetents, Support: domain.SupportUnknown},
-		domain.Control{ID: "pan", Name: "Horizontal wheel", Kind: domain.ControlAxis, Usage: domain.HID(0x0c, 0x238), Mapping: domain.MappingInferred, Mode: domain.AxisRelative, Unit: domain.UnitDetents, Support: domain.SupportUnknown})
+	c.caps.Controls = append(
+		c.caps.Controls,
+		domain.Control{
+			ID:      "wheel",
+			Name:    "Wheel",
+			Kind:    domain.ControlAxis,
+			Usage:   domain.HID(1, 0x38),
+			Mapping: domain.MappingInferred,
+			Mode:    domain.AxisRelative,
+			Unit:    domain.UnitDetents,
+			Support: domain.SupportUnknown,
+		},
+		domain.Control{
+			ID:      "pan",
+			Name:    "Horizontal wheel",
+			Kind:    domain.ControlAxis,
+			Usage:   domain.HID(0x0c, 0x238),
+			Mapping: domain.MappingInferred,
+			Mode:    domain.AxisRelative,
+			Unit:    domain.UnitDetents,
+			Support: domain.SupportUnknown,
+		},
+	)
 	if c.device.hwheel {
 		c.caps.Controls[len(c.caps.Controls)-1].Support = domain.SupportSupported
 	}
@@ -795,7 +961,12 @@ func (c *capture) hidCapabilities(ctx context.Context) error {
 			return domain.ErrUnsupported
 		}
 		data := make([]byte, size)
-		if _, err := rawDeviceInfo(c.device.handle, command, unsafe.Pointer(&data[0]), &size); err != nil {
+		if _, err := rawDeviceInfo(
+			c.device.handle,
+			command,
+			unsafe.Pointer(&data[0]),
+			&size,
+		); err != nil {
 			return err
 		}
 		if size > uint32(len(data)) {
@@ -811,7 +982,12 @@ func (c *capture) hidCapabilities(ctx context.Context) error {
 		if status := hid.HidP_GetCaps(pp, &caps); status != hid.HIDP_STATUS_SUCCESS {
 			return hidError("HidP_GetCaps", status)
 		}
-		desc := &descriptor{preparsed: data, reportLen: caps.InputReportByteLength, controls: make(map[hidIndex]hidControl), reportIDs: make(map[byte]bool)}
+		desc := &descriptor{
+			preparsed: data,
+			reportLen: caps.InputReportByteLength,
+			controls:  make(map[hidIndex]hidControl),
+			reportIDs: make(map[byte]bool),
+		}
 		desc.maxData = hid.HidP_MaxDataListLength(hid.HidP_Input, pp)
 		if desc.maxData > maxDevices || desc.reportLen == 0 {
 			return domain.ErrUnsupported
@@ -831,7 +1007,12 @@ func (c *capture) hidCapabilities(ctx context.Context) error {
 		if caps.NumberInputButtonCaps != 0 {
 			count := caps.NumberInputButtonCaps
 			buttons := make([]hid.HIDP_BUTTON_CAPS, count)
-			if status := hid.HidP_GetButtonCaps(hid.HidP_Input, &buttons[0], &count, pp); status != hid.HIDP_STATUS_SUCCESS {
+			if status := hid.HidP_GetButtonCaps(
+				hid.HidP_Input,
+				&buttons[0],
+				&count,
+				pp,
+			); status != hid.HIDP_STATUS_SUCCESS {
 				return hidError("HidP_GetButtonCaps", status)
 			}
 			if int(count) > len(buttons) {
@@ -856,17 +1037,42 @@ func (c *capture) hidCapabilities(ctx context.Context) error {
 						// Relative boolean deltas are not absolute button state.
 						support = domain.SupportUnsupported
 					}
-					add(hidControl{button: true,
-						control: domain.Control{ID: id, Name: fmt.Sprintf("HID %04x:%04x", button.UsagePage, usage), Kind: kind, Usage: domain.HID(button.UsagePage, uint16(usage)),
-							Mapping: domain.MappingReported, Range: &domain.Range{Min: 0, Max: 1}, Unit: domain.UnitBoolean, Support: support},
-						native: ext.NativeControl{ID: string(id), ReportID: button.ReportID, DataIndex: uint16(dataIndex), LinkCollection: button.LinkCollection, ReportCount: button.ReportCount, BitSize: 1, LogicalMin: 0, LogicalMax: 1, Absolute: button.IsAbsolute != 0}})
+					add(hidControl{
+						button: true,
+						control: domain.Control{
+							ID:      id,
+							Name:    fmt.Sprintf("HID %04x:%04x", button.UsagePage, usage),
+							Kind:    kind,
+							Usage:   domain.HID(button.UsagePage, uint16(usage)),
+							Mapping: domain.MappingReported,
+							Range:   &domain.Range{Min: 0, Max: 1},
+							Unit:    domain.UnitBoolean,
+							Support: support,
+						},
+						native: ext.NativeControl{
+							ID:             string(id),
+							ReportID:       button.ReportID,
+							DataIndex:      uint16(dataIndex),
+							LinkCollection: button.LinkCollection,
+							ReportCount:    button.ReportCount,
+							BitSize:        1,
+							LogicalMin:     0,
+							LogicalMax:     1,
+							Absolute:       button.IsAbsolute != 0,
+						},
+					})
 				}
 			}
 		}
 		if caps.NumberInputValueCaps != 0 {
 			count := caps.NumberInputValueCaps
 			values := make([]hid.HIDP_VALUE_CAPS, count)
-			if status := hid.HidP_GetValueCaps(hid.HidP_Input, &values[0], &count, pp); status != hid.HIDP_STATUS_SUCCESS {
+			if status := hid.HidP_GetValueCaps(
+				hid.HidP_Input,
+				&values[0],
+				&count,
+				pp,
+			); status != hid.HIDP_STATUS_SUCCESS {
 				return hidError("HidP_GetValueCaps", status)
 			}
 			if int(count) > len(values) {
@@ -886,32 +1092,70 @@ func (c *capture) hidCapabilities(ctx context.Context) error {
 				}
 				for usage, dataIndex := lo, index; usage <= hi && dataIndex <= end; usage, dataIndex = usage+1, dataIndex+1 {
 					id := hidID(value.ReportID, value.LinkCollection, uint16(dataIndex))
-					ctrl := domain.Control{ID: id, Name: fmt.Sprintf("HID %04x:%04x", value.UsagePage, usage), Kind: domain.ControlAxis,
-						Usage: domain.HID(value.UsagePage, uint16(usage)), Mapping: domain.MappingReported, Unit: domain.UnitLogical, Support: domain.SupportSupported}
+					ctrl := domain.Control{
+						ID:   id,
+						Name: fmt.Sprintf("HID %04x:%04x", value.UsagePage, usage),
+						Kind: domain.ControlAxis,
+						Usage: domain.HID(
+							value.UsagePage,
+							uint16(usage),
+						),
+						Mapping: domain.MappingReported,
+						Unit:    domain.UnitLogical,
+						Support: domain.SupportSupported,
+					}
 					if value.IsAbsolute != 0 {
-						ctrl.Mode, ctrl.Range = domain.AxisAbsolute, &domain.Range{Min: minValue, Max: maxValue}
+						ctrl.Mode, ctrl.Range = domain.AxisAbsolute, &domain.Range{
+							Min: minValue,
+							Max: maxValue,
+						}
 					} else {
 						ctrl.Mode, ctrl.Unit = domain.AxisRelative, domain.UnitCounts
 					}
 					// A range with several distinct usages is not a usage-value array.
-					if value.BitSize == 0 || value.BitSize > 32 || (value.IsRange == 0 && value.ReportCount > 1) {
+					if value.BitSize == 0 || value.BitSize > 32 ||
+						(value.IsRange == 0 && value.ReportCount > 1) {
 						ctrl.Support = domain.SupportUnsupported
 					}
-					normalHat := value.UsagePage == 1 && usage == 0x39 && value.IsAbsolute != 0 && conventionalHat(value, minValue, maxValue)
+					normalHat := value.UsagePage == 1 && usage == 0x39 && value.IsAbsolute != 0 &&
+						conventionalHat(value, minValue, maxValue)
 					if normalHat {
-						ctrl.Kind, ctrl.Unit, ctrl.Range = domain.ControlHat, domain.UnitDirection, &domain.Range{Min: -1, Max: 7}
+						ctrl.Kind, ctrl.Unit, ctrl.Range = domain.ControlHat, domain.UnitDirection, &domain.Range{
+							Min: -1,
+							Max: 7,
+						}
 					} else if value.IsAbsolute != 0 && minValue == 0 && maxValue == 1 {
 						ctrl.Kind, ctrl.Unit = domain.ControlSwitch, domain.UnitBoolean
 					}
-					add(hidControl{control: ctrl, hat: normalHat, native: ext.NativeControl{ID: string(id), ReportID: value.ReportID, DataIndex: uint16(dataIndex),
-						LinkCollection: value.LinkCollection, BitSize: value.BitSize, ReportCount: value.ReportCount, LogicalMin: value.LogicalMin, LogicalMax: value.LogicalMax,
-						PhysicalMin: value.PhysicalMin, PhysicalMax: value.PhysicalMax, Units: value.Units, UnitsExponent: value.UnitsExp, HasNull: value.HasNull != 0, Absolute: value.IsAbsolute != 0}})
+					add(hidControl{control: ctrl, hat: normalHat, native: ext.NativeControl{
+						ID:             string(id),
+						ReportID:       value.ReportID,
+						DataIndex:      uint16(dataIndex),
+						LinkCollection: value.LinkCollection,
+						BitSize:        value.BitSize,
+						ReportCount:    value.ReportCount,
+						LogicalMin:     value.LogicalMin,
+						LogicalMax:     value.LogicalMax,
+						PhysicalMin:    value.PhysicalMin,
+						PhysicalMax:    value.PhysicalMax,
+						Units:          value.Units,
+						UnitsExponent:  value.UnitsExp,
+						HasNull:        value.HasNull != 0,
+						Absolute:       value.IsAbsolute != 0,
+					}})
 				}
 			}
 		}
 		sort.Slice(controls, func(i, j int) bool { return controls[i].ID < controls[j].ID })
-		sort.Slice(nativeControls, func(i, j int) bool { return nativeControls[i].ID < nativeControls[j].ID })
-		c.hid, c.caps = desc, domain.Capabilities{Controls: controls, Complete: true, Repeat: domain.SupportUnsupported}
+		sort.Slice(
+			nativeControls,
+			func(i, j int) bool { return nativeControls[i].ID < nativeControls[j].ID },
+		)
+		c.hid, c.caps = desc, domain.Capabilities{
+			Controls: controls,
+			Complete: true,
+			Repeat:   domain.SupportUnsupported,
+		}
 		c.native.Controls = nativeControls
 		return nil
 	})
@@ -934,7 +1178,10 @@ func capRange(words [8]uint16, isRange bool) (uint32, uint32, uint32, uint32, er
 		hi, end = uint32(words[1]), uint32(words[7])
 	}
 	if hi < lo || end < index || hi-lo != end-index {
-		return 0, 0, 0, 0, errors.Join(domain.ErrUnsupported, errors.New("invalid HID capability range"))
+		return 0, 0, 0, 0, errors.Join(
+			domain.ErrUnsupported,
+			errors.New("invalid HID capability range"),
+		)
 	}
 	return lo, hi, index, end, nil
 }
@@ -947,7 +1194,8 @@ func conventionalHat(value hid.HIDP_VALUE_CAPS, minValue, maxValue int64) bool {
 		return false
 	}
 	positions := maxValue - minValue + 1
-	return value.PhysicalMax == 0 || (positions == 4 && value.PhysicalMax == 270) || (positions == 8 && value.PhysicalMax == 315)
+	return value.PhysicalMax == 0 || (positions == 4 && value.PhysicalMax == 270) ||
+		(positions == 8 && value.PhysicalMax == 315)
 }
 
 func hidError(op string, status foundation.NTSTATUS) error {
@@ -957,7 +1205,14 @@ func hidError(op string, status foundation.NTSTATUS) error {
 func (b *backend) readInput(handle input.HRAWINPUT) {
 	var size uint32
 	headerSize := uint32(unsafe.Sizeof(input.RAWINPUTHEADER{}))
-	ret, _, errno := syscall.SyscallN(input.Procs.GetRawInputData.Addr(), uintptr(handle), 0x10000003, 0, uintptr(unsafe.Pointer(&size)), uintptr(headerSize))
+	ret, _, errno := syscall.SyscallN(
+		input.Procs.GetRawInputData.Addr(),
+		uintptr(handle),
+		0x10000003,
+		0,
+		uintptr(unsafe.Pointer(&size)),
+		uintptr(headerSize),
+	)
 	if uint32(ret) == maxUint32 {
 		b.failAll(errors.Join(domain.ErrEventLoss, native.LastError(errno)))
 		return
@@ -967,7 +1222,14 @@ func (b *backend) readInput(handle input.HRAWINPUT) {
 		return
 	}
 	data := make([]byte, size)
-	ret, _, errno = syscall.SyscallN(input.Procs.GetRawInputData.Addr(), uintptr(handle), 0x10000003, uintptr(unsafe.Pointer(&data[0])), uintptr(unsafe.Pointer(&size)), uintptr(headerSize))
+	ret, _, errno = syscall.SyscallN(
+		input.Procs.GetRawInputData.Addr(),
+		uintptr(handle),
+		0x10000003,
+		uintptr(unsafe.Pointer(&data[0])),
+		uintptr(unsafe.Pointer(&size)),
+		uintptr(headerSize),
+	)
 	if uint32(ret) == maxUint32 {
 		b.failAll(errors.Join(domain.ErrEventLoss, native.LastError(errno)))
 		return
@@ -1026,8 +1288,22 @@ func (c *capture) fail(err error) {
 	}
 }
 
-func (c *capture) emit(id domain.ControlID, action domain.EventAction, value float64, stamp domain.Timestamp) {
-	if !c.closed.Load() && !c.sink.Publish(domain.Event{DeviceID: c.info.ID, ControlID: id, Action: action, Value: value, Timestamp: stamp}) {
+func (c *capture) emit(
+	id domain.ControlID,
+	action domain.EventAction,
+	value float64,
+	stamp domain.Timestamp,
+) {
+	if !c.closed.Load() &&
+		!c.sink.Publish(
+			domain.Event{
+				DeviceID:  c.info.ID,
+				ControlID: id,
+				Action:    action,
+				Value:     value,
+				Timestamp: stamp,
+			},
+		) {
 		c.closed.Store(true)
 	}
 }
@@ -1037,7 +1313,13 @@ func (c *capture) keyboard(data []byte, stamp domain.Timestamp) {
 		c.fail(domain.ErrEventLoss)
 		return
 	}
-	makeCode, flags, vkey := binary.LittleEndian.Uint16(data), binary.LittleEndian.Uint16(data[2:]), binary.LittleEndian.Uint16(data[6:])
+	makeCode, flags, vkey := binary.LittleEndian.Uint16(
+		data,
+	), binary.LittleEndian.Uint16(
+		data[2:],
+	), binary.LittleEndian.Uint16(
+		data[6:],
+	)
 	if makeCode == 0xff {
 		c.fail(domain.ErrEventLoss)
 		return
@@ -1093,7 +1375,13 @@ func (c *capture) mouse(data []byte, stamp domain.Timestamp) {
 		c.fail(domain.ErrEventLoss)
 		return
 	}
-	flags, buttons, wheel := binary.LittleEndian.Uint16(data), binary.LittleEndian.Uint16(data[4:]), int16(binary.LittleEndian.Uint16(data[6:]))
+	flags, buttons, wheel := binary.LittleEndian.Uint16(
+		data,
+	), binary.LittleEndian.Uint16(
+		data[4:],
+	), int16(
+		binary.LittleEndian.Uint16(data[6:]),
+	)
 	for i := uint16(0); i < 5; i++ {
 		id := domain.ControlID(fmt.Sprintf("button:%d", i+1))
 		if buttons&(1<<(i*2)) != 0 {
@@ -1103,7 +1391,11 @@ func (c *capture) mouse(data []byte, stamp domain.Timestamp) {
 			c.emit(id, domain.ActionRelease, 0, stamp)
 		}
 	}
-	x, y := int64(int32(binary.LittleEndian.Uint32(data[12:]))), int64(int32(binary.LittleEndian.Uint32(data[16:])))
+	x, y := int64(
+		int32(binary.LittleEndian.Uint32(data[12:])),
+	), int64(
+		int32(binary.LittleEndian.Uint32(data[16:])),
+	)
 	if flags&1 != 0 {
 		for _, axis := range []struct {
 			id    domain.ControlID
@@ -1161,7 +1453,14 @@ func (c *capture) report(report []byte, stamp domain.Timestamp) {
 	}
 	count := uint32(len(data))
 	pp := hid.PHIDP_PREPARSED_DATA(uintptr(unsafe.Pointer(&c.hid.preparsed[0])))
-	status := hid.HidP_GetData(hid.HidP_Input, &data[0], &count, pp, &report[0], uint32(len(report)))
+	status := hid.HidP_GetData(
+		hid.HidP_Input,
+		&data[0],
+		&count,
+		pp,
+		&report[0],
+		uint32(len(report)),
+	)
 	runtime.KeepAlive(c.hid.preparsed)
 	runtime.KeepAlive(report)
 	if status != hid.HIDP_STATUS_SUCCESS || count > uint32(len(data)) {

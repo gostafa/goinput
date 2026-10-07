@@ -1,8 +1,11 @@
-// Package implementation wires the private input runtime.
+// Gostafa 2026.
+// SPDX-License-Identifier: Apache-2.0.
+
 package implementation
 
 import (
 	"context"
+
 	"github.com/gostafa/goinput/internal/adapters/backoff"
 	_ "github.com/gostafa/goinput/internal/adapters/evdev"
 	_ "github.com/gostafa/goinput/internal/adapters/iokit"
@@ -20,14 +23,18 @@ func newCoordinator(context.Context) (*application.Coordinator, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return application.NewCoordinator(factory, backoff.Retrier{}), nil
 }
+
 func New(options domain.Options) (*application.Manager, error) {
 	if options.BufferSize < 0 {
 		return nil, domain.ErrInvalidOptions
 	}
+
 	if _, err := platform.Factory(); err != nil {
 		return nil, err
 	}
+
 	return application.NewManager(options, coordinator)
 }

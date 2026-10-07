@@ -1,12 +1,15 @@
+// Gostafa 2026.
+// SPDX-License-Identifier: Apache-2.0.
+
 package goinput
 
 import (
 	"context"
-	"reflect"
-	"slices"
-
+	"errors"
 	"fmt"
 	"math"
+	"reflect"
+	"slices"
 
 	"github.com/gostafa/goinput/internal/application"
 	"github.com/gostafa/goinput/internal/domain"
@@ -26,12 +29,15 @@ func (u Usage) String() string { return fmt.Sprintf("%04x:%04x", u.Page(), u.ID(
 func (c Control) Normalize(value float64) (float64, bool) {
 	if c.Kind != ControlAxis || c.Mode != AxisAbsolute || c.Range == nil ||
 		c.Range.Max <= c.Range.Min || math.IsNaN(value) || math.IsInf(value, 0) {
+
 		return 0, false
 	}
+
 	lo, hi := float64(c.Range.Min), float64(c.Range.Max)
 	if hi <= lo || value < lo || value > hi {
 		return 0, false
 	}
+
 	return (value - lo) / (hi - lo), true
 }
 
@@ -39,6 +45,7 @@ func (e *OpError) Error() string {
 	if e.DeviceID == "" {
 		return fmt.Sprintf("goinput: %s: %v", e.Op, e.Err)
 	}
+
 	return fmt.Sprintf("goinput: %s %s: %v", e.Op, e.DeviceID, e.Err)
 }
 
@@ -51,19 +58,24 @@ func New(options Options) (*Manager, error) {
 	if err != nil {
 		return nil, publicError(err)
 	}
+
 	return &Manager{impl: impl}, nil
 }
 
 // Devices returns accessible endpoints together with any partial discovery diagnostics.
 func (m *Manager) Devices(ctx context.Context) ([]DeviceInfo, error) {
 	infos, err := m.impl.Devices(ctx)
+
 	var result []DeviceInfo
+
 	if infos != nil {
 		result = make([]DeviceInfo, len(infos))
 	}
+
 	for i, info := range infos {
 		result[i] = publicInfo(info)
 	}
+
 	return result, publicError(err)
 }
 
@@ -73,6 +85,7 @@ func (m *Manager) Open(ctx context.Context, id DeviceID) (Device, error) {
 	if err != nil {
 		return nil, publicError(err)
 	}
+
 	return &device{impl: impl}, nil
 }
 
@@ -82,47 +95,78 @@ func (d *device) Info() DeviceInfo           { return publicInfo(d.impl.Info()) 
 func (d *device) Capabilities() Capabilities { return publicCapabilities(d.impl.Capabilities()) }
 func (d *device) Read(ctx context.Context) (Event, error) {
 	e, err := d.impl.Read(ctx)
-	return Event{DeviceID: DeviceID(e.DeviceID), ControlID: ControlID(e.ControlID),
-		Action: EventAction(e.Action), Value: e.Value,
-		Timestamp: Timestamp{Time: e.Timestamp.Time, ReceivedAt: e.Timestamp.ReceivedAt, Source: TimestampSource(e.Timestamp.Source)}}, publicError(err)
+
+	return Event{
+		DeviceID:  DeviceID(e.DeviceID),
+		ControlID: ControlID(e.ControlID),
+		Action:    EventAction(e.Action),
+		Value:     e.Value,
+		Timestamp: Timestamp{
+			Time:       e.Timestamp.Time,
+			ReceivedAt: e.Timestamp.ReceivedAt,
+			Source:     TimestampSource(e.Timestamp.Source),
+		},
+	}, publicError(err)
 }
 func (d *device) Close() error { return publicError(d.impl.Close()) }
 func (d *device) Extension(target any) bool {
 	provider, ok := d.impl.(application.ExtensionProvider)
+
 	return ok && provider.Extension(target)
 }
 
 func publicInfo(i domain.DeviceInfo) DeviceInfo {
-	r := DeviceInfo{ID: DeviceID(i.ID), Name: i.Name, Path: i.Path, Manufacturer: i.Manufacturer,
-		Serial: i.Serial, Transport: Transport(i.Transport)}
+	r := DeviceInfo{
+		ID: DeviceID(i.ID), Name: i.Name, Path: i.Path, Manufacturer: i.Manufacturer,
+		Serial: i.Serial, Transport: Transport(i.Transport),
+	}
 	if i.VendorID != nil {
 		v := *i.VendorID
+
 		r.VendorID = &v
 	}
+
 	if i.ProductID != nil {
 		v := *i.ProductID
+
 		r.ProductID = &v
 	}
+
 	if i.Classes != nil {
 		r.Classes = make([]DeviceClass, len(i.Classes))
 	}
+
 	for n, c := range i.Classes {
 		r.Classes[n] = DeviceClass(c)
 	}
+
 	return r
 }
+
 func publicCapabilities(c domain.Capabilities) Capabilities {
 	r := Capabilities{Complete: c.Complete, Repeat: Support(c.Repeat)}
 	if c.Controls != nil {
 		r.Controls = make([]Control, len(c.Controls))
 	}
+
 	for i, v := range c.Controls {
-		r.Controls[i] = Control{ID: ControlID(v.ID), Name: v.Name, Kind: ControlKind(v.Kind), Usage: Usage(v.Usage),
-			Mapping: MappingSource(v.Mapping), Mode: AxisMode(v.Mode), Unit: Unit(v.Unit), Support: Support(v.Support)}
+		r.Controls[i] = Control{
+			ID:    ControlID(v.ID),
+			Name:  v.Name,
+			Kind:  ControlKind(v.Kind),
+			Usage: Usage(v.Usage),
+			Mapping: MappingSource(
+				v.Mapping,
+			),
+			Mode:    AxisMode(v.Mode),
+			Unit:    Unit(v.Unit),
+			Support: Support(v.Support),
+		}
 		if v.Range != nil {
 			r.Controls[i].Range = &Range{Min: v.Range.Min, Max: v.Range.Max}
 		}
 	}
+
 	return r
 }
 
@@ -130,55 +174,72 @@ func (e *translatedError) Error() string   { return e.original.Error() }
 func (e *translatedError) Unwrap() []error { return slices.Clone(e.children) }
 func (e *translatedError) Is(target error) bool {
 	matcher, ok := e.original.(interface{ Is(error) bool })
+
 	return sameError(e.original, target) || ok && matcher.Is(target)
 }
+
 func (e *translatedError) As(target any) bool {
 	matcher, ok := e.original.(interface{ As(any) bool })
+
 	return ok && matcher.As(target)
 }
+
 func publicError(err error) error {
 	if err == nil {
 		return nil
 	}
-	switch err {
-	case domain.ErrUnsupported:
+
+	switch {
+	case errors.Is(err, domain.ErrUnsupported):
 		return ErrUnsupported
-	case domain.ErrPermissionDenied:
+	case errors.Is(err, domain.ErrPermissionDenied):
 		return ErrPermissionDenied
-	case domain.ErrNotFound:
+	case errors.Is(err, domain.ErrNotFound):
 		return ErrNotFound
-	case domain.ErrClosed:
+	case errors.Is(err, domain.ErrClosed):
 		return ErrClosed
-	case domain.ErrDisconnected:
+	case errors.Is(err, domain.ErrDisconnected):
 		return ErrDisconnected
-	case domain.ErrEventLoss:
+	case errors.Is(err, domain.ErrEventLoss):
 		return ErrEventLoss
-	case domain.ErrRegistrationConflict:
+	case errors.Is(err, domain.ErrRegistrationConflict):
 		return ErrRegistrationConflict
-	case domain.ErrInvalidOptions:
+	case errors.Is(err, domain.ErrInvalidOptions):
 		return ErrInvalidOptions
 	}
-	if e, ok := err.(*domain.OpError); ok {
+
+	e := &domain.OpError{}
+	if errors.As(err, &e) {
 		return &OpError{Op: e.Op, DeviceID: DeviceID(e.DeviceID), Err: publicError(e.Err)}
 	}
+
 	var children []error
-	switch e := err.(type) {
-	case interface{ Unwrap() []error }:
-		children = e.Unwrap()
-	case interface{ Unwrap() error }:
-		children = []error{e.Unwrap()}
-	default:
-		return err
+
+	{
+		var e interface{ Unwrap() []error }
+		var e1 interface{ Unwrap() error }
+		switch {
+		case errors.As(err, &e):
+			children = e.Unwrap()
+		case errors.As(err, &e1):
+			children = []error{e1.Unwrap()}
+		default:
+			return err
+		}
 	}
+
 	changed := false
 	converted := make([]error, len(children))
+
 	for i, c := range children {
 		converted[i] = publicError(c)
 		changed = changed || !sameError(converted[i], c)
 	}
+
 	if !changed {
 		return err
 	}
+
 	return &translatedError{original: err, children: converted}
 }
 
@@ -186,5 +247,6 @@ func sameError(a, b error) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
-	return reflect.TypeOf(a).Comparable() && a == b
+
+	return reflect.TypeOf(a).Comparable() && errors.Is(a, b)
 }

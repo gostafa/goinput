@@ -1,4 +1,4 @@
-// Package evdev adapts Linux evdev devices to the input backend ports.
-// It supports read-only capture on Linux amd64 and arm64. HID usages are
-// inferred from evdev semantics; original HID report identities are unavailable.
+// Gostafa 2026.
+// SPDX-License-Identifier: Apache-2.0.
+
 package evdev

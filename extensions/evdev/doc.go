@@ -1,4 +1,4 @@
-// Package evdev exposes optional, read-only Linux evdev metadata.
-// Obtain Metadata through a device's Extension method. Its absence is normal
-// on other platforms. Returned slices and maps are independent snapshots.
+// Gostafa 2026.
+// SPDX-License-Identifier: Apache-2.0.
+
 package evdev

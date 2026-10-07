@@ -1,3 +1,4 @@
-// Package backoff implements bounded discovery retries. It is the only adapter
-// that imports the retry engine directly. A policy is never shared by callers.
+// Gostafa 2026.
+// SPDX-License-Identifier: Apache-2.0.
+
 package backoff

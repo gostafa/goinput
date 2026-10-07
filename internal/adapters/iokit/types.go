@@ -16,13 +16,13 @@ import (
 )
 
 type backend struct {
+	closeErr  error
+	retrier   ports.Retrier
 	jobs      chan request
 	stop      chan struct{}
 	done      chan struct{}
 	ready     chan error
 	closeOnce sync.Once
-	closeErr  error
-	retrier   ports.Retrier
 }
 
 type request struct {
@@ -37,30 +37,30 @@ type response struct {
 }
 
 type session struct {
+	anchor      time.Time
 	backend     *backend
+	keys        map[string]cf.CFStringRef
+	captures    map[*capture]struct{}
 	manager     native.IOHIDManagerRef
 	runLoop     cf.CFRunLoopRef
 	mode        cf.CFStringRef
-	keys        map[string]cf.CFStringRef
-	captures    map[*capture]struct{}
-	anchor      time.Time
 	anchorTicks uint64
 }
 
 type capture struct {
-	backend   *backend
-	clock     *session
-	ref       native.IOHIDDeviceRef
-	token     uintptr
-	info      domain.DeviceInfo
-	caps      domain.Capabilities
-	metadata  extension.Metadata
 	sink      ports.EventSink
-	controls  map[uint32]elementControl
-	pressed   map[domain.ControlID]bool
-	closed    atomic.Bool
-	closeOnce sync.Once
 	closeErr  error
+	clock     *session
+	pressed   map[domain.ControlID]bool
+	controls  map[uint32]elementControl
+	backend   *backend
+	info      domain.DeviceInfo
+	metadata  extension.Metadata
+	caps      domain.Capabilities
+	token     uintptr
+	ref       native.IOHIDDeviceRef
+	closeOnce sync.Once
+	closed    atomic.Bool
 }
 
 type elementControl struct {

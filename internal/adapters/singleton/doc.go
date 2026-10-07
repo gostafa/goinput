@@ -1,4 +1,4 @@
-// Package singleton adapts the singleton dependency to the provider port.
-// Only inert process-lived coordinators belong in these providers, not native
-// sessions: a successfully initialized singleton cannot be reset or closed.
+// Gostafa 2026.
+// SPDX-License-Identifier: Apache-2.0.
+
 package singleton

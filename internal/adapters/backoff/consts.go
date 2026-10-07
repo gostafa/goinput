@@ -1,8 +1,12 @@
+// Gostafa 2026.
+// SPDX-License-Identifier: Apache-2.0.
+
 package backoff
 
 import (
-	"github.com/gostafa/goinput/internal/ports"
 	"time"
+
+	"github.com/gostafa/goinput/internal/ports"
 )
 
 const (

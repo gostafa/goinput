@@ -1,3 +1,6 @@
+// Gostafa 2026.
+// SPDX-License-Identifier: Apache-2.0.
+
 package application
 
 import (
@@ -24,19 +27,19 @@ type ExtensionProvider interface{ Extension(target any) bool }
 // Manager owns its captures and a lazily acquired shared native-session lease.
 // Construct with NewManager; the zero value is not usable. Do not copy a manager.
 type Manager struct {
-	mu        sync.Mutex
-	ops       sync.WaitGroup
-	closed    bool
-	devices   map[*stream]struct{}
-	options   domain.Options
 	provider  ports.Provider[*Coordinator]
-	lease     *lease
-	leaseGate chan struct{}
-	ctx       context.Context
-	cancel    context.CancelCauseFunc
-	closeOnce sync.Once
-	closeDone chan struct{}
 	closeErr  error
+	ctx       context.Context
+	lease     *lease
+	devices   map[*stream]struct{}
+	leaseGate chan struct{}
+	cancel    context.CancelCauseFunc
+	closeDone chan struct{}
+	ops       sync.WaitGroup
+	options   domain.Options
+	closeOnce sync.Once
+	mu        sync.Mutex
+	closed    bool
 }
 
 type sessionState uint8
@@ -44,22 +47,22 @@ type sessionState uint8
 // Coordinator is process-lived Go state. Only its replaceable session owns
 // native resources. Successful singleton initialization never caches a handle.
 type Coordinator struct {
-	mu         sync.Mutex
-	state      sessionState
-	changed    chan struct{}
-	factory    ports.Factory
 	retrier    ports.Retrier
 	backend    ports.Backend
+	changed    chan struct{}
+	factory    ports.Factory
 	refs       int
 	generation uint64
+	mu         sync.Mutex
+	state      sessionState
 }
 
 type lease struct {
-	coordinator *Coordinator
 	backend     ports.Backend
+	err         error
+	coordinator *Coordinator
 	generation  uint64
 	once        sync.Once
-	err         error
 }
 
 type leasedSink struct {
@@ -68,19 +71,19 @@ type leasedSink struct {
 }
 
 type stream struct {
-	mu        sync.Mutex
+	closeErr  error
+	capture   ports.Capture
+	terminal  error
+	notify    chan struct{}
 	owner     *Manager
+	closeDone chan struct{}
+	done      chan struct{}
 	id        domain.DeviceID
 	info      domain.DeviceInfo
-	caps      domain.Capabilities
-	capture   ports.Capture
 	queue     []domain.Event
-	head      int
+	caps      domain.Capabilities
 	size      int
-	notify    chan struct{}
-	done      chan struct{}
-	terminal  error
+	head      int
 	closeOnce sync.Once
-	closeDone chan struct{}
-	closeErr  error
+	mu        sync.Mutex
 }

@@ -1,3 +1,6 @@
+// Gostafa 2026.
+// SPDX-License-Identifier: Apache-2.0.
+
 package platform
 
 import (
@@ -11,6 +14,7 @@ func Register(f ports.Factory) {
 	if f == nil || factory != nil {
 		panic("goinput: invalid or duplicate platform factory")
 	}
+
 	factory = f
 }
 
@@ -18,5 +22,6 @@ func Factory() (ports.Factory, error) {
 	if factory == nil {
 		return nil, domain.ErrUnsupported
 	}
+
 	return factory, nil
 }

@@ -1,3 +1,6 @@
+// Gostafa 2026.
+// SPDX-License-Identifier: Apache-2.0.
+
 package goinput
 
 import (
@@ -17,6 +20,8 @@ var (
 	ErrInvalidOptions       = errors.New("goinput: invalid options")
 )
 
-var _ Device = (*device)(nil)
-var _ ExtensionProvider = (*device)(nil)
-var _ managerImpl = (*application.Manager)(nil)
+var (
+	_ Device            = (*device)(nil)
+	_ ExtensionProvider = (*device)(nil)
+	_ managerImpl       = (*application.Manager)(nil)
+)
