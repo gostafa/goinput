@@ -23,8 +23,6 @@ import (
 	hid "github.com/deploymenttheory/go-bindings-win32/bindings/win32/devices/humaninterfacedevice"
 	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/foundation"
 	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/storage/filesystem"
-	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/system/libraryloader"
-	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/system/threading"
 	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/ui/input"
 	wm "github.com/deploymenttheory/go-bindings-win32/bindings/win32/ui/windowsandmessaging"
 	ext "github.com/gostafa/goinput/extensions/win32"
@@ -110,7 +108,7 @@ func findProcedures(procedures []*native.Proc) error {
 	for entryIndex := range procedures {
 		procedure := procedures[entryIndex]
 
-		probeErr := procedure.Find()
+		probeErr := winFindProcedure(procedure)
 		if probeErr != nil {
 			return errors.Join(domain.ErrUnsupported, probeErr)
 		}
@@ -132,7 +130,7 @@ func backendInitialize(owner *backend) error {
 
 	initializeCallback(owner.native)
 
-	event, err := threading.CreateEvent(nil, false, false, nil)
+	event, err := winCreateEvent(nil, false, false, nil)
 	if err != nil {
 		return errors.Join(normalizeError(err))
 	}
@@ -143,7 +141,7 @@ func backendInitialize(owner *backend) error {
 }
 
 func backendCreateWindow(owner *backend) error {
-	instance, err := libraryloader.GetModuleHandle(nil)
+	instance, err := winGetModuleHandle(nil)
 	if err != nil {
 		return errors.Join(normalizeError(err))
 	}
@@ -168,7 +166,7 @@ func backendRegisterWindowClass(owner *backend, instance foundation.HINSTANCE) e
 	owner.className = windowClassName(owner.native)
 
 	class := makeWindowClass(owner, instance)
-	atom, err := wm.RegisterClass(&class)
+	atom, err := winRegisterClass(&class)
 
 	if atom != noValue {
 		return nil
@@ -196,7 +194,7 @@ func backendMessageLoop(owner *backend) error {
 }
 
 func backendWaitForMessages(owner *backend, handles []foundation.HANDLE) error {
-	result, err := wm.MsgWaitForMultipleObjectsEx(
+	result, err := winMsgWaitForMultipleObjectsEx(
 		handles,
 		infiniteWait,
 		wm.QUEUE_STATUS_FLAGS(
@@ -218,12 +216,12 @@ func backendWaitForMessages(owner *backend, handles []foundation.HANDLE) error {
 func backendDispatchMessages(owner *backend) bool {
 	var msg wm.MSG
 
-	for !owner.stopping && wm.PeekMessage(&msg, noValue, noValue, noValue, wm.PEEK_MESSAGE_REMOVE_TYPE(singleValue)) {
+	for !owner.stopping && winPeekMessage(&msg, noValue, noValue, noValue, wm.PEEK_MESSAGE_REMOVE_TYPE(singleValue)) {
 		if msg.Message == messageQuit {
 			return true
 		}
 
-		wm.DispatchMessage(&msg)
+		winDispatchMessage(&msg)
 		backendDrainCommands(owner) // High-frequency input must not starve Close/Open.
 	}
 
@@ -245,7 +243,7 @@ func nativeStateWindowProc(environment *nativeState, event *windowMessage) found
 }
 
 func windowMessageDefaultResult(event *windowMessage) foundation.LRESULT {
-	return wm.DefWindowProc(event.hwnd, event.message, event.wParam, event.lParam)
+	return winDefWindowProc(event.hwnd, event.message, event.wParam, event.lParam)
 }
 
 func backendHandleWindowMessage(owner *backend, event *windowMessage) foundation.LRESULT {
@@ -367,7 +365,7 @@ func backendSignalWake(owner *backend) error {
 	}
 
 	// Holding mu keeps teardown from closing or reusing the HANDLE during SetEvent.
-	return errors.Join(threading.SetEvent(owner.wakeEvent))
+	return errors.Join(winSetEvent(owner.wakeEvent))
 }
 
 func backendSignalCommand(owner *backend, cmd *command) error {
@@ -452,7 +450,7 @@ func backendDestroyWindow(owner *backend) error {
 
 	owner.native.windows.Delete(owner.hwnd)
 
-	return errors.Join(wm.DestroyWindow(owner.hwnd))
+	return errors.Join(winDestroyWindow(owner.hwnd))
 }
 
 func backendUnregisterWindowClass(owner *backend) error {
@@ -460,9 +458,9 @@ func backendUnregisterWindowClass(owner *backend) error {
 		return nil
 	}
 
-	instance, err := libraryloader.GetModuleHandle(nil)
+	instance, err := winGetModuleHandle(nil)
 
-	return errors.Join(err, wm.UnregisterClass(owner.className, foundation.HINSTANCE(instance)))
+	return errors.Join(err, winUnregisterClass(owner.className, foundation.HINSTANCE(instance)))
 }
 
 func backendCloseWakeEvent(owner *backend) error {
@@ -470,7 +468,7 @@ func backendCloseWakeEvent(owner *backend) error {
 		return nil
 	}
 
-	err := foundation.CloseHandle(owner.wakeEvent)
+	err := winCloseHandle(owner.wakeEvent)
 
 	owner.wakeEvent = noValue
 
@@ -854,7 +852,7 @@ func matchesRegistration(usage topLevel, registration input.RAWINPUTDEVICE) bool
 }
 
 func backendAddRegistration(owner *backend, usage topLevel) error {
-	return errors.Join(input.RegisterRawInputDevices([]input.RAWINPUTDEVICE{{
+	return errors.Join(winRegisterRawInputDevices([]input.RAWINPUTDEVICE{{
 		UsUsagePage: usage.page, UsUsage: usage.usage,
 		DwFlags: input.RAWINPUTDEVICE_FLAGS(registrationFlags), HwndTarget: owner.hwnd,
 	}}, nativeSize[input.RAWINPUTDEVICE]()))
@@ -906,7 +904,7 @@ func backendRemoveOwnedRegistration(owner *backend, registration input.RAWINPUTD
 	registration.HwndTarget = noValue
 
 	return errors.Join(
-		input.RegisterRawInputDevices(
+		winRegisterRawInputDevices(
 			[]input.RAWINPUTDEVICE{registration},
 			uint32(unsafe.Sizeof(registration)),
 		),
@@ -917,7 +915,7 @@ func registeredDevices() ([]input.RAWINPUTDEVICE, error) {
 	var count uint32
 
 	size := nativeSize[input.RAWINPUTDEVICE]()
-	written, err := input.GetRegisteredRawInputDevices(nil, &count, size)
+	written, err := winGetRegisteredRawInputDevices(nil, &count, size)
 
 	if written == infiniteWait {
 		return nil, errors.Join(nonzeroError(err))
@@ -930,7 +928,7 @@ func registeredDevices() ([]input.RAWINPUTDEVICE, error) {
 
 func readRegisteredDevices(count, size uint32) ([]input.RAWINPUTDEVICE, error) {
 	list := allocateBuffer[input.RAWINPUTDEVICE](int(count))
-	written, err := input.GetRegisteredRawInputDevices(&list[noValue], &count, size)
+	written, err := winGetRegisteredRawInputDevices(&list[noValue], &count, size)
 
 	if written == infiniteWait {
 		return nil, errors.Join(nonzeroError(err))
@@ -956,7 +954,7 @@ func backendDisconnect(owner *backend, handle foundation.HANDLE) {
 }
 
 func rawDeviceList(list *input.RAWINPUTDEVICELIST, count *uint32, size uint32) (uint32, error) {
-	written, err := input.GetRawInputDeviceList(list, count, size)
+	written, err := winGetRawInputDeviceList(list, count, size)
 	if written == infiniteWait {
 		return written, errors.Join(nonzeroError(err))
 	}
@@ -967,7 +965,7 @@ func rawDeviceList(list *input.RAWINPUTDEVICELIST, count *uint32, size uint32) (
 func rawDeviceInfo(handle foundation.HANDLE, command input.RAW_INPUT_DEVICE_INFO_COMMAND,
 	buffer nativeBuffer,
 ) (uint32, error) {
-	written, err := input.GetRawInputDeviceInfo(handle, command, buffer.data, buffer.size)
+	written, err := winGetRawInputDeviceInfo(handle, command, buffer.data, buffer.size)
 	if written == infiniteWait {
 		return written, errors.Join(nonzeroError(err))
 	}
@@ -1110,7 +1108,7 @@ func enrichIdentity(device *nativeDevice) (err error) {
 		return nil
 	}
 
-	defer func() { err = errors.Join(err, foundation.CloseHandle(handle.value)) }()
+	defer func() { err = errors.Join(err, winCloseHandle(handle.value)) }()
 
 	nativeDeviceLoadAttributes(device, handle.value)
 	nativeDeviceLoadStrings(device, handle.value)
@@ -1123,7 +1121,7 @@ func nativeDeviceLoadAttributes(device *nativeDevice, handle foundation.HANDLE) 
 
 	attributes.Size = uint32(unsafe.Sizeof(attributes))
 
-	if hid.HidD_GetAttributes(handle, &attributes) != noValue {
+	if winHidD_GetAttributes(handle, &attributes) != noValue {
 		vendor, product := attributes.VendorID, attributes.ProductID
 
 		device.info.VendorID, device.info.ProductID = &vendor, &product
@@ -1132,12 +1130,12 @@ func nativeDeviceLoadAttributes(device *nativeDevice, handle foundation.HANDLE) 
 }
 
 func nativeDeviceLoadStrings(device *nativeDevice, handle foundation.HANDLE) {
-	if name := readHIDString(handle, hid.HidD_GetProductString); name != emptyString {
+	if name := readHIDString(handle, winHidD_GetProductString); name != emptyString {
 		device.info.Name = name
 	}
 
-	device.info.Manufacturer = readHIDString(handle, hid.HidD_GetManufacturerString)
-	device.info.Serial = readHIDString(handle, hid.HidD_GetSerialNumberString)
+	device.info.Manufacturer = readHIDString(handle, winHidD_GetManufacturerString)
+	device.info.Serial = readHIDString(handle, winHidD_GetSerialNumberString)
 }
 
 func readHIDString(
@@ -1436,14 +1434,14 @@ func makeHIDBuilder(data []byte) (*hidBuilder, error) {
 
 	var caps hid.HIDP_CAPS
 
-	if status := hid.HidP_GetCaps(preparsedAddress, &caps); status != hid.HIDP_STATUS_SUCCESS {
+	if status := winHidP_GetCaps(preparsedAddress, &caps); status != hid.HIDP_STATUS_SUCCESS {
 		return nil, errors.Join(hidError("HidP_GetCaps", status))
 	}
 
 	desc := &descriptor{
 		preparsed: data, reportLen: caps.InputReportByteLength,
 		controls: make(map[hidIndex]hidControl), reportIDs: make(map[byte]bool),
-		maxData: hid.HidP_MaxDataListLength(hid.HidP_Input, preparsedAddress),
+		maxData: winHidP_MaxDataListLength(hid.HidP_Input, preparsedAddress),
 	}
 	if desc.maxData > maxDevices || desc.reportLen == noValue {
 		return nil, domain.ErrUnsupported
@@ -1480,7 +1478,7 @@ func hidBuilderAdd(builder *hidBuilder, control *hidControl) {
 }
 
 func hidBuilderLoadButtons(builder *hidBuilder) error {
-	args := makeCapabilityAdapter(hid.HidP_GetButtonCaps, projectButtonCapability, makeHIDButton)
+	args := makeCapabilityAdapter(winHidP_GetButtonCaps, projectButtonCapability, makeHIDButton)
 
 	return errors.Join(loadNativeCapabilitySet(builder, builder.caps.NumberInputButtonCaps, args))
 }
@@ -1516,7 +1514,7 @@ func buttonSupport(absolute foundation.BOOLEAN) domain.Support {
 }
 
 func hidBuilderLoadValues(builder *hidBuilder) error {
-	args := makeCapabilityAdapter(hid.HidP_GetValueCaps, projectValueCapability, makeHIDValue)
+	args := makeCapabilityAdapter(winHidP_GetValueCaps, projectValueCapability, makeHIDValue)
 
 	return errors.Join(loadNativeCapabilitySet(builder, builder.caps.NumberInputValueCaps, args))
 }
@@ -1626,10 +1624,10 @@ func backendReadInput(owner *backend, handle input.HRAWINPUT) {
 }
 
 func rawInputData(handle input.HRAWINPUT, buffer nativeBuffer) (uint32, error) {
-	result := input.GetRawInputData(handle, input.RAW_INPUT_DATA_COMMAND_FLAGS(inputDataCommand),
+	result := winGetRawInputData(handle, input.RAW_INPUT_DATA_COMMAND_FLAGS(inputDataCommand),
 		buffer.data, buffer.size, nativeSize[input.RAWINPUTHEADER]())
 	if result == infiniteWait {
-		return noValue, errors.Join(domain.ErrEventLoss, syscall.GetLastError())
+		return noValue, errors.Join(domain.ErrEventLoss, winGetLastError())
 	}
 
 	return result, nil
@@ -1912,7 +1910,7 @@ func captureReadHIDReport(subscription *capture, report []byte) ([]hid.HIDP_DATA
 	data := allocateBuffer[hid.HIDP_DATA](int(subscription.hid.maxData))
 	count := subscription.hid.maxData
 	preparsedAddress := descriptorPointer(subscription.hid)
-	status := hid.HidP_GetData(
+	status := winHidP_GetData(
 		hid.HidP_Input,
 		&data[noValue],
 		&count,
@@ -2042,6 +2040,10 @@ func Factory() ports.Factory {
 
 	environment.tables = tables
 
+	return makeFactory(environment, tableErr)
+}
+
+func makeFactory(environment *nativeState, tableErr error) ports.Factory {
 	return func(ctx context.Context, retrier ports.Retrier) (ports.Backend, error) {
 		if tableErr != nil {
 			return nil, errors.Join(tableErr)
@@ -2221,7 +2223,7 @@ func awaitBackendStartup(owner *backend) error {
 
 func initializeCallback(environment *nativeState) {
 	environment.callbackOnce.Do(func() {
-		environment.callbackAddr = syscall.NewCallback(func(hwnd foundation.HWND, message uint32,
+		environment.callbackAddr = winNewCallback(func(hwnd foundation.HWND, message uint32,
 			wParam foundation.WPARAM, lParam foundation.LPARAM,
 		) foundation.LRESULT {
 			return nativeStateWindowProc(environment,
@@ -2232,7 +2234,7 @@ func initializeCallback(environment *nativeState) {
 }
 
 func backendCreateMessageWindow(owner *backend, instance foundation.HINSTANCE) error {
-	window, err := wm.CreateWindowEx(
+	window, err := winCreateWindowEx(
 		noValue, &owner.className, nil, noValue, noValue, noValue,
 		noValue, noValue, wm.HWND_MESSAGE, noValue, instance, nil,
 	)
@@ -2554,7 +2556,7 @@ func applyKeyboardDeviceInfo(device *nativeDevice) {
 }
 
 func openIdentityHandle(path string) (*identityHandle, error) {
-	handle, err := filesystem.CreateFile(path, noValue, filesystem.FILE_SHARE_MODE(thirdValue), nil,
+	handle, err := winCreateFile(path, noValue, filesystem.FILE_SHARE_MODE(thirdValue), nil,
 		filesystem.FILE_CREATION_DISPOSITION(thirdValue), noValue, noValue)
 	if err != nil {
 		return nil, fmt.Errorf("open identity handle: %w", err)
