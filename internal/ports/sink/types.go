@@ -14,9 +14,7 @@ type (
 		Publisher[E]
 		FailureReceiver
 	}
-)
 
-type (
 	// Operations exposes immutable, typed sink callbacks.
 	Operations[E any] struct {
 		// Operations holds the immutable dispatch table.

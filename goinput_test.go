@@ -18,6 +18,22 @@ type (
 	noncomparableError []byte
 )
 
+const (
+	testOpenOperation  = "open"
+	normalizedMinimum  = 0
+	errorPairSize      = 2
+	normalizedMidpoint = 0.5
+	normalizedMaximum  = 1
+	hatTestMaximum     = 7
+	axisTestLimit      = 10
+	axisOutsideLimit   = 11
+
+	viewDeviceID  = "view-device"
+	viewControlID = "view-control"
+)
+
+var errDriverFailed = errors.New("driver failed")
+
 func (noncomparableError) Error() string { return "noncomparable cause" }
 
 func TestOperationTranslationPreservesKnownCause(t *testing.T) {
@@ -114,8 +130,6 @@ func TestErrorIdentityHandlesNoncomparableErrors(t *testing.T) {
 	checkEqual(t, publicError(cause).Error(), cause.Error())
 }
 
-var errDriverFailed = errors.New("driver failed")
-
 func TestMissingDeviceClassesStayNil(t *testing.T) {
 	t.Parallel()
 
@@ -123,17 +137,6 @@ func TestMissingDeviceClassesStayNil(t *testing.T) {
 		t.Fatal("missing device classes became an allocated slice")
 	}
 }
-
-const (
-	testOpenOperation  = "open"
-	normalizedMinimum  = 0
-	errorPairSize      = 2
-	normalizedMidpoint = 0.5
-	normalizedMaximum  = 1
-	hatTestMaximum     = 7
-	axisTestLimit      = 10
-	axisOutsideLimit   = 11
-)
 
 func TestPublicErrorSentinels(t *testing.T) {
 	t.Parallel()
@@ -188,11 +191,6 @@ func TestSystemPreservesProviderFailure(t *testing.T) {
 		t.Fatalf("provider failure = (%v, %v)", system, err)
 	}
 }
-
-const (
-	viewDeviceID  = "view-device"
-	viewControlID = "view-control"
-)
 
 func TestDeviceViewCopiesMetadata(t *testing.T) {
 	t.Parallel()

@@ -18,12 +18,21 @@ func (caps *CapabilitiesRecord[C, Supported]) Copy() CapabilitiesRecord[C, Suppo
 }
 
 // Clone copies a control, including its optional mutable logical range.
-func (c ControlRecord[R, ID, U, Kind, Mapping, Mode, ValueUnit, Supported]) Clone() ControlRecord[
+func (control ControlRecord[R, ID, U, Kind, Mapping, Mode, ValueUnit, Supported]) Clone() ControlRecord[
 	R, ID, U, Kind, Mapping, Mode, ValueUnit, Supported,
 ] {
 	return ControlRecord[R, ID, U, Kind, Mapping, Mode, ValueUnit, Supported]{
-		Range: clonePointer(c.Range), ID: c.ID, Name: c.Name, Usage: c.Usage,
-		Kind: c.Kind, Mapping: c.Mapping, Mode: c.Mode, Unit: c.Unit, Support: c.Support,
+		Range: clonePointer(
+			control.Range,
+		),
+		ID:      control.ID,
+		Name:    control.Name,
+		Usage:   control.Usage,
+		Kind:    control.Kind,
+		Mapping: control.Mapping,
+		Mode:    control.Mode,
+		Unit:    control.Unit,
+		Support: control.Support,
 	}
 }
 

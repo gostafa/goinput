@@ -17,6 +17,13 @@ type (
 		want     HatDirection
 		accepted bool
 	}
+
+	normalizationExample struct {
+		value            float64
+		minimum, maximum int64
+		want             float64
+		valid            bool
+	}
 )
 
 const (
@@ -27,6 +34,12 @@ const (
 	testReplacementProductID = 4
 	testHatMaximum           = 7
 	testHatNull              = 8
+
+	normalizationSpan     = 10
+	normalizationMiddle   = 5
+	normalizationFraction = 0.5
+	testOperation         = "read"
+	testEndpoint          = "endpoint"
 )
 
 func TestHatEncodings(t *testing.T) {
@@ -138,23 +151,6 @@ func reversedHatCase() hatExample {
 		false,
 	}
 }
-
-type (
-	normalizationExample struct {
-		value            float64
-		minimum, maximum int64
-		want             float64
-		valid            bool
-	}
-)
-
-const (
-	normalizationSpan     = 10
-	normalizationMiddle   = 5
-	normalizationFraction = 0.5
-	testOperation         = "read"
-	testEndpoint          = "endpoint"
-)
 
 func TestNormalizeLogicalBounds(t *testing.T) {
 	t.Parallel()

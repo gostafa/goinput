@@ -20,9 +20,7 @@ type (
 
 	// Closer defines the corresponding resource operation.
 	Closer interface{ Close() error }
-)
 
-type (
 	// Operations exposes immutable, typed manager callbacks.
 	Operations[I, ID, D any] struct {
 		// Operations holds the immutable dispatch table.

@@ -13,7 +13,6 @@ import (
 
 type (
 	hatExample struct {
-		name     string
 		logical  subject.Range
 		value    int64
 		null     subject.Support
@@ -30,34 +29,40 @@ const (
 	testReplacementProductID = 4
 	testHatMaximum           = 7
 	testHatNull              = 8
+
+	normalizationSpan     = 10
+	normalizationMiddle   = 5
+	normalizationFraction = 0.5
+	testOperation         = "read"
+	testEndpoint          = "endpoint"
 )
 
 func TestHatCompassDirections(t *testing.T) {
 	t.Parallel()
-	checkCompassDirections(
-		t,
-		[]subject.HatDirection{
-			subject.HatNorth,
-			subject.HatNorthEast,
-			subject.HatEast,
-			subject.HatSouthEast,
-			subject.HatSouth,
-			subject.HatSouthWest,
-			subject.HatWest,
-			subject.HatNorthWest,
-		},
-		testFirstIndex,
-	)
-	checkCompassDirections(
-		t,
-		[]subject.HatDirection{
-			subject.HatNorth,
-			subject.HatEast,
-			subject.HatSouth,
-			subject.HatWest,
-		},
-		testVendorID,
-	)
+	checkCompassDirections(t, eightCompassDirections(), testFirstIndex)
+	checkCompassDirections(t, fourCompassDirections(), testVendorID)
+}
+
+func eightCompassDirections() []subject.HatDirection {
+	return []subject.HatDirection{
+		subject.HatNorth,
+		subject.HatNorthEast,
+		subject.HatEast,
+		subject.HatSouthEast,
+		subject.HatSouth,
+		subject.HatSouthWest,
+		subject.HatWest,
+		subject.HatNorthWest,
+	}
+}
+
+func fourCompassDirections() []subject.HatDirection {
+	return []subject.HatDirection{
+		subject.HatNorth,
+		subject.HatEast,
+		subject.HatSouth,
+		subject.HatWest,
+	}
 }
 
 func TestCloneInfoIndependence(t *testing.T) {
@@ -65,24 +70,28 @@ func TestCloneInfoIndependence(t *testing.T) {
 
 	vendor, product := uint16(testVendorID), uint16(testProductID)
 	want := [testProductID]uint16{vendor, product}
-	original := subject.DeviceInfo{
+	original := originalDeviceInfo(&vendor, &product)
+	clone := subject.CloneInfo(original)
+
+	*clone.VendorID = testReplacementVendorID
+	*clone.ProductID = testReplacementProductID
+	clone.Classes[testFirstIndex] = subject.ClassKeyboard
+
+	checkOriginalInfo(t, original, &want)
+}
+
+func originalDeviceInfo(vendor, product *uint16) *subject.DeviceInfo {
+	return &subject.DeviceInfo{
 		ID:           "",
 		Name:         "",
 		Path:         "",
 		Manufacturer: "",
 		Serial:       "",
 		Transport:    subject.TransportUnknown,
-		VendorID:     &vendor,
-		ProductID:    &product,
+		VendorID:     vendor,
+		ProductID:    product,
 		Classes:      []subject.DeviceClass{subject.ClassMouse},
 	}
-	clone := subject.CloneInfo(&original)
-
-	*clone.VendorID = testReplacementVendorID
-	*clone.ProductID = testReplacementProductID
-	clone.Classes[testFirstIndex] = subject.ClassKeyboard
-
-	checkOriginalInfo(t, &original, &want)
 }
 
 func checkHat(t *testing.T, example *hatExample) {
@@ -103,7 +112,6 @@ func checkCompassDirections(t *testing.T, directions []subject.HatDirection, min
 
 	for ordinal := range directions {
 		checkHat(t, &hatExample{
-			name:    "compass",
 			logical: subject.Range{Min: minimum, Max: minimum + int64(len(directions)) - 1},
 			value: minimum + int64(
 				ordinal,
@@ -126,14 +134,6 @@ func checkOriginalInfo(t *testing.T, original *subject.DeviceInfo, want *[testPr
 		t.Fatal("mutating cloned metadata changed the original")
 	}
 }
-
-const (
-	normalizationSpan     = 10
-	normalizationMiddle   = 5
-	normalizationFraction = 0.5
-	testOperation         = "read"
-	testEndpoint          = "endpoint"
-)
 
 func TestUsageRoundTrip(t *testing.T) {
 	t.Parallel()

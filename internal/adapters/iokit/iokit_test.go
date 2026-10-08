@@ -12,7 +12,6 @@ import (
 	"reflect"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/ebitengine/purego"
 	extension "github.com/gostafa/goinput/extensions/iokit"
@@ -21,6 +20,49 @@ import (
 	cf "github.com/tmc/apple/corefoundation"
 	native "github.com/tmc/apple/iokit"
 )
+
+type (
+	callbackSink struct {
+		failure error
+	}
+
+	tickExample struct {
+		ticks    uint64
+		anchor   uint64
+		duration time.Duration
+		valid    bool
+	}
+
+	collectionSymbols = struct{ create, insert string }
+
+	coverageRetrier struct{}
+
+	contextValueLookup interface{ Value(key any) any }
+
+	cancelOnCheckContext struct {
+		contextValueLookup
+
+		deadline func() (time.Time, bool)
+		done     func() <-chan struct{}
+	}
+)
+
+const (
+	testValueHandle = 1
+	testEarlierTick = 95
+	testAnchorTick  = 100
+	testLaterTick   = 105
+	testTickDelta   = 5
+
+	testPropertyNumber = 42
+	testNumberProperty = "number"
+	testMissingDevice  = "missing"
+	testNativeResource = "test-native-resource"
+	testWrongType      = "wrong type"
+	testPlainString    = "abc"
+)
+
+var errUnexpectedExecution = errors.New("unexpected execution")
 
 func TestCoreFoundationReleaseUsesOpaqueHandle(t *testing.T) {
 	t.Parallel()
@@ -305,8 +347,6 @@ func configureWheelCollection(environment *nativeState) {
 	environment.api.IOHIDElementGetCollectionType = func(native.IOHIDElementRef) uint32 { return nativeTwo }
 }
 
-var errUnexpectedExecution = errors.New("unexpected execution")
-
 func TestNativeValuePublishesCopiedEvent(t *testing.T) {
 	t.Parallel()
 
@@ -453,30 +493,9 @@ func checkHatEvents(t *testing.T, device *capture, item *elementControl) {
 	event := captureScalarEvent(device, item, nativeOne)
 	nativeEqual(t, event.Value, float64(domain.HatNorthEast))
 
-	item.control.Kind = domain.ControlKind(domain.HatSwitch.ID())
+	item.control.Kind = domain.ControlKind(domain.HatSwitch.ID() & math.MaxUint8)
 	nativeEqual(t, captureScalarEvent(device, item, nativeOne) == nil, true)
 }
-
-type (
-	callbackSink struct {
-		failure error
-	}
-
-	tickExample struct {
-		ticks    uint64
-		anchor   uint64
-		duration time.Duration
-		valid    bool
-	}
-)
-
-const (
-	testValueHandle = 1
-	testEarlierTick = 95
-	testAnchorTick  = 100
-	testLaterTick   = 105
-	testTickDelta   = 5
-)
 
 func (sink *callbackSink) Fail(err error) { sink.failure = err }
 
@@ -615,11 +634,7 @@ func checkTickDuration(t *testing.T, environment *nativeState, example *tickExam
 	}
 }
 
-type (
-	collectionSymbols = struct{ create, insert string }
-)
-
-func nativeCollection(t *testing.T, symbols collectionSymbols) uintptr {
+func nativeCollection(t *testing.T, symbols *collectionSymbols) uintptr {
 	t.Helper()
 
 	var ref uintptr
@@ -656,7 +671,7 @@ func TestCoreFoundationSetCopiesDeviceReferences(t *testing.T) {
 
 	ref := nativeCollection(
 		t,
-		collectionSymbols{create: "CFSetCreateMutable", insert: "CFSetAddValue"},
+		&collectionSymbols{create: "CFSetCreateMutable", insert: "CFSetAddValue"},
 	)
 	devices, err := setDevices(cf.CFSetRef(ref), nativeTwo)
 	nativeCause(t, err, nil)
@@ -673,7 +688,7 @@ func TestCoreFoundationArrayCopiesDescriptorReferences(t *testing.T) {
 
 	ref := nativeCollection(
 		t,
-		collectionSymbols{create: "CFArrayCreateMutable", insert: "CFArrayAppendValue"},
+		&collectionSymbols{create: "CFArrayCreateMutable", insert: "CFArrayAppendValue"},
 	)
 	elements, err := matchingElements(fakeNativeState(), cf.CFArrayRef(ref))
 	nativeCause(t, err, nil)
@@ -718,7 +733,7 @@ func checkMissingAndCanceledDiscovery(t *testing.T, environment *nativeState, se
 	cancel()
 	nativeCause(t, resultError(sessionDiscover(ctx, environment, session)), context.Canceled)
 
-	search := newSessionFindDeviceArguments(session, "missing")
+	search := newSessionFindDeviceArguments(session, testMissingDevice)
 	nativeCause(
 		t,
 		resultError(sessionFindDevice(t.Context(), environment, search)),
@@ -761,7 +776,7 @@ func TestInvalidInventoryCountReleasesSet(t *testing.T) {
 		domain.ErrUnsupported,
 	)
 
-	request := newSessionFindDeviceArguments(session, "missing")
+	request := newSessionFindDeviceArguments(session, testMissingDevice)
 	nativeCause(
 		t,
 		resultError(sessionFindDevice(t.Context(), environment, request)),
@@ -916,7 +931,7 @@ func zeroNativeResults(signature reflect.Type) func([]reflect.Value) []reflect.V
 func ownedNativeString(t *testing.T) cf.CFStringRef {
 	t.Helper()
 
-	ref := cf.CFStringCreateWithCString(nativeZero, "test-native-resource", utf8Encoding)
+	ref := cf.CFStringCreateWithCString(nativeZero, testNativeResource, utf8Encoding)
 	if ref == nativeZero {
 		t.Fatal("CoreFoundation did not allocate a test resource")
 	}
@@ -961,10 +976,14 @@ func checkBackendDiscovery(t *testing.T, backend *backendOperations) {
 
 func checkBackendMissingDevice(t *testing.T, backend *backendOperations) {
 	t.Helper()
-	nativeCause(t, resultError(backend.Open(t.Context(), "missing", nil)), domain.ErrInvalidOptions)
+	nativeCause(
+		t,
+		resultError(backend.Open(t.Context(), testMissingDevice, nil)),
+		domain.ErrInvalidOptions,
+	)
 
 	sink := &callbackSink{failure: nil}
-	device, err := backend.Open(t.Context(), "missing", sink)
+	device, err := backend.Open(t.Context(), testMissingDevice, sink)
 	nativeCause(t, err, domain.ErrNotFound)
 	nativeEqual(t, device == nil, true)
 }
@@ -1147,7 +1166,7 @@ func TestInvalidCallbackRegistryEntryIsIgnored(t *testing.T) {
 	t.Parallel()
 
 	environment := fakeNativeState()
-	environment.callbackRegistry.Store(uintptr(testValueHandle), "wrong type")
+	environment.callbackRegistry.Store(uintptr(testValueHandle), testWrongType)
 	nativeEqual(t, registeredCapture(environment, testValueHandle) == nil, true)
 	inputValueCallback(
 		environment,
@@ -1172,7 +1191,8 @@ func TestSessionPanicFailsRemainingCaptures(t *testing.T) {
 func configureZeroNativeAPI(environment *nativeState) {
 	functions := reflect.ValueOf(&environment.api).Elem()
 
-	for _, field := range functions.Fields() {
+	for index := range functions.Type().NumField() {
+		field := functions.Field(index)
 		field.Set(reflect.MakeFunc(field.Type(), zeroNativeResults(field.Type())))
 	}
 }
@@ -1205,7 +1225,9 @@ func configureNativeClock(environment *nativeState) {
 }
 
 func TestNativeSymbolInitialization(t *testing.T) {
-	environment := &nativeState{core: defaultCoreAPI()}
+	t.Parallel()
+
+	environment := newNativeTestState()
 	nativeCause(t, loadSymbols(environment), nil)
 	nativeCause(t, loadSymbols(environment), nil)
 	nativeEqual(t, environment.valueCallback != nativeZero, true)
@@ -1231,13 +1253,15 @@ func checkNativeHIDProbes(t *testing.T, environment *nativeState) {
 func closeNativeLibraries(t *testing.T, environment *nativeState) {
 	t.Helper()
 
-	for _, library := range environment.nativeLibraryHandles {
-		nativeCause(t, purego.Dlclose(library), nil)
+	for index := range environment.nativeLibraryHandles {
+		nativeCause(t, purego.Dlclose(environment.nativeLibraryHandles[index]), nil)
 	}
 }
 
 func TestNativeLoadingFailures(t *testing.T) {
-	environment := &nativeState{core: defaultCoreAPI()}
+	t.Parallel()
+
+	environment := newNativeTestState()
 
 	checkNativeBindingFailures(t, environment)
 
@@ -1257,7 +1281,7 @@ func TestNativeLoadingFailures(t *testing.T) {
 func checkNativeBindingFailures(t *testing.T, environment *nativeState) {
 	t.Helper()
 
-	environment.core.openLibrary = func(string, int) (uintptr, error) { return nativeZero, domain.ErrUnsupported }
+	environment.core.openLibrary = unavailableNativeLibrary[uintptr]
 	nativeCause(t, initializeSymbols(environment), domain.ErrUnsupported)
 	nativeEqual(t, loadFramework(environment), uintptr(nativeZero))
 	nativeCause(t, loadHIDFunctions(environment, nativeZero), domain.ErrUnsupported)
@@ -1340,13 +1364,14 @@ func checkNativeFrameworkLoadingFailure(t *testing.T, environment *nativeState) 
 			return purego.Dlopen(path, flags)
 		}
 
-		return nativeZero, domain.ErrUnsupported
+		return unavailableNativeLibrary[uintptr](path, flags)
 	}
 	environment.core.bind = bind
 	nativeCause(t, initializeSymbols(environment), domain.ErrUnsupported)
 
-	for _, library := range environment.nativeLibraryHandles[nativeOne+nativeTwo:] {
-		nativeCause(t, purego.Dlclose(library), nil)
+	libraries := environment.nativeLibraryHandles[nativeOne+nativeTwo:]
+	for index := range libraries {
+		nativeCause(t, purego.Dlclose(libraries[index]), nil)
 	}
 }
 
@@ -1355,22 +1380,17 @@ func checkNativeLibrarySymbolFailures(t *testing.T) {
 
 	nativeCause(
 		t,
-		nativeLibraryCall("/missing/goinput", "missing", func(func()) error { return nil }),
+		nativeLibraryCall("/missing/goinput", testMissingDevice, func(func()) error { return nil }),
 		domain.ErrUnsupported,
 	)
 
 	library, err := purego.Dlopen(coreFoundationLibrary, purego.RTLD_NOW|purego.RTLD_LOCAL)
 	nativeCause(t, err, nil)
 
-	defer purego.Dlclose(library)
+	t.Cleanup(func() { nativeCause(t, purego.Dlclose(library), nil) })
 
 	nativeCause(t, bind(library, "missing_goinput_symbol", new(func())), domain.ErrUnsupported)
 }
-
-const (
-	testPropertyNumber = 42
-	testNumberProperty = "number"
-)
 
 func TestNativeProperties(t *testing.T) {
 	t.Parallel()
@@ -1391,12 +1411,10 @@ func TestNativeProperties(t *testing.T) {
 func checkNativeStringProperty(t *testing.T, environment *nativeState, session *session) {
 	t.Helper()
 
-	text := ownedNativeString(t)
-
-	defer releaseNative(uintptr(text))
+	text := ownedStringProperty(t)
 
 	environment.api.IOHIDDeviceGetProperty = func(native.IOHIDDeviceRef, cf.CFStringRef) cf.CFTypeRef {
-		return cf.CFTypeRef(unsafe.Pointer(uintptr(text)))
+		return text
 	}
 	nativeEqual(
 		t,
@@ -1404,34 +1422,17 @@ func checkNativeStringProperty(t *testing.T, environment *nativeState, session *
 			environment,
 			newSessionStringPropertyArguments("text", session, nativeZero),
 		),
-		"test-native-resource",
+		testNativeResource,
 	)
 }
 
 func checkNativeNumberProperties(t *testing.T, environment *nativeState, session *session) {
 	t.Helper()
 
-	var number cf.CFNumberRef
-
-	value := int64(testPropertyNumber)
-
-	nativeCause(
-		t,
-		coreFoundationCall(
-			"CFNumberCreate",
-			func(create func(uintptr, int64, *int64) cf.CFNumberRef) error {
-				number = create(nativeZero, int64(cf.KCFNumberSInt64Type), &value)
-
-				return nil
-			},
-		),
-		nil,
-	)
-
-	defer releaseNative(uintptr(number))
+	number := ownedNumberProperty(t)
 
 	environment.api.IOHIDDeviceGetProperty = func(native.IOHIDDeviceRef, cf.CFStringRef) cf.CFTypeRef {
-		return cf.CFTypeRef(unsafe.Pointer(uintptr(number)))
+		return number
 	}
 
 	checkNativeNumberValues(t, environment, session)
@@ -1456,6 +1457,12 @@ func checkNativeNumberValues(t *testing.T, environment *nativeState, session *se
 		),
 		uint32(value),
 	)
+	checkNumberPropertyAsString(t, environment, session)
+}
+
+func checkNumberPropertyAsString(t *testing.T, environment *nativeState, session *session) {
+	t.Helper()
+
 	nativeEqual(
 		t,
 		sessionStringProperty(
@@ -1477,7 +1484,7 @@ func checkNativeClassesAndStrings(t *testing.T, environment *nativeState) {
 		true,
 	)
 	nativeEqual(t, nulString([]byte{'a', nativeZero, 'b'}), "a")
-	nativeEqual(t, nulString([]byte("abc")), "abc")
+	nativeEqual(t, nulString([]byte(testPlainString)), testPlainString)
 }
 
 func checkNativeDevicePath(t *testing.T, environment *nativeState) {
@@ -1499,47 +1506,35 @@ func checkNativeDevicePath(t *testing.T, environment *nativeState) {
 func checkNativeIdentifiersAndStatus(t *testing.T) {
 	t.Helper()
 
-	for _, value := range []int64{-nativeOne, maxNativeElements, testPropertyNumber} {
+	values := [...]int64{-nativeOne, maxNativeElements, testPropertyNumber}
+	for index := range values {
+		value := values[index]
 		id := sessionIdentifier[uint16](func(string) (int64, bool) { return value, true }, "key")
 
-		if value == testPropertyNumber {
-			nativeEqual(t, *id, uint16(testPropertyNumber))
-		} else {
-			nativeEqual(t, id == nil, true)
-		}
+		checkNativeIdentifier(t, id, value)
 	}
 
 	nativeCause(t, statusError(nativeOne), domain.ErrUnsupported)
 
-	_, err := setDevices(nativeZero, nativeZero)
+	devices, err := setDevices(nativeZero, nativeZero)
 	nativeCause(t, err, nil)
+	nativeEqual(t, devices == nil, true)
 }
 
 func TestNativeReaderFailures(t *testing.T) {
 	t.Parallel()
 
-	for _, length := range []int{-nativeOne, maxNativeString} {
-		nativeEqual(
-			t,
-
-			nativeString(length, func([]byte) bool {
-				t.Fatal("invalid length read")
-
-				return true
-			}),
-			"",
-		)
-	}
+	checkInvalidNativeStringLengths(t)
 
 	nativeEqual(t, nativeString(nativeOne, func([]byte) bool { return false }), "")
 
-	_, err := readSetDevices(nativeOne, func([]uintptr) error { return domain.ErrUnsupported })
+	devices, err := readSetDevices(
+		nativeOne,
+		func([]uintptr) error { return domain.ErrUnsupported },
+	)
 	nativeCause(t, err, domain.ErrUnsupported)
+	nativeEqual(t, devices == nil, true)
 }
-
-type coverageRetrier struct{}
-
-type cancelOnCheckContext struct{ context.Context }
 
 func (coverageRetrier) Do(
 	ctx context.Context,
@@ -1547,54 +1542,110 @@ func (coverageRetrier) Do(
 	transient func(error) bool,
 ) error {
 	if transient(domain.ErrUnsupported) {
-		panic("discovery must not retry")
+		return errUnexpectedExecution
 	}
 
-	return operation(ctx)
+	return errors.Join(operation(ctx))
 }
 
 func TestDiscoveryRejectsMalformedReply(t *testing.T) {
 	t.Parallel()
 
 	environment := fakeNativeState()
-	b := newBackendState(coverageRetrier{})
-	nativeCause(
-		t,
-		backendRunDiscovery(
-			t.Context(),
-			b,
-			func(context.Context) error { return domain.ErrUnsupported },
-		),
-		domain.ErrUnsupported,
-	)
+	backend := newBackendState(coverageRetrier{})
+	checkDiscoveryDoesNotRetry(t, backend)
 
-	go func() {
-		job := <-b.jobs
-		job(newSession(b))
-	}()
+	go serveNativeRequest(newSession(backend))
 
-	// A fake native inventory panic reaches the request error path.
+	// A fake native inventory panic reaches the job error path.
 	environment.api.IOHIDManagerCopyDevices = nil
 	nativeCause(
 		t,
-		resultError(backendDiscoverDevices(t.Context(), environment, b)),
+		resultError(backendDiscoverDevices(t.Context(), environment, backend)),
 		domain.ErrUnsupported,
 	)
 	nativeCause(t, resultError(discoveredDevices("bad inventory")), domain.ErrUnsupported)
+}
+
+func checkDiscoveryDoesNotRetry(t *testing.T, backend *backend) {
+	t.Helper()
+
+	err := backendRunDiscovery(t.Context(), backend, func(context.Context) error {
+		return domain.ErrUnsupported
+	})
+	nativeCause(t, err, domain.ErrUnsupported)
+}
+
+func ownedStringProperty(t *testing.T) cf.CFTypeRef {
+	t.Helper()
+
+	var text cf.CFTypeRef
+
+	err := coreFoundationCall("CFStringCreateWithCString",
+		func(create func(uintptr, string, uint32) cf.CFTypeRef) error {
+			text = create(nativeZero, testNativeResource, utf8Encoding)
+
+			return nil
+		})
+	nativeCause(t, err, nil)
+	cleanupNativeProperty(t, text)
+
+	return text
+}
+
+func ownedNumberProperty(t *testing.T) cf.CFTypeRef {
+	t.Helper()
+
+	var number cf.CFTypeRef
+
+	value := int64(testPropertyNumber)
+	err := coreFoundationCall("CFNumberCreate",
+		func(create func(uintptr, int64, *int64) cf.CFTypeRef) error {
+			number = create(nativeZero, int64(cf.KCFNumberSInt64Type), &value)
+
+			return nil
+		})
+	nativeCause(t, err, nil)
+	cleanupNativeProperty(t, number)
+
+	return number
+}
+
+func cleanupNativeProperty(t *testing.T, property cf.CFTypeRef) {
+	t.Helper()
+
+	if property == nil {
+		t.Fatal("CoreFoundation did not allocate a property")
+	}
+
+	t.Cleanup(func() {
+		err := coreFoundationCall("CFRelease", func(release func(cf.CFTypeRef)) error {
+			release(property)
+
+			return nil
+		})
+		nativeCause(t, err, nil)
+	})
 }
 
 func TestReadyCancellationAfterNotification(t *testing.T) {
 	t.Parallel()
 
 	environment := fakeNativeState()
-	b := newBackendState(nil)
-	close(b.done)
+	backend := newBackendState(nil)
+	close(backend.done)
 
-	b.ready <- nil
+	backend.ready <- nil
 
-	ctx := &cancelOnCheckContext{Context: t.Context()}
-	nativeCause(t, resultError(backendAwaitReady(ctx, environment, b)), context.Canceled)
+	ctx := &cancelOnCheckContext{
+		contextValueLookup: t.Context(), deadline: t.Context().Deadline, done: t.Context().Done,
+	}
+	nativeCause(t, resultError(backendAwaitReady(ctx, environment, backend)), context.Canceled)
 }
+
+func (ctx *cancelOnCheckContext) Deadline() (time.Time, bool) { return ctx.deadline() }
+
+func (ctx *cancelOnCheckContext) Done() <-chan struct{} { return ctx.done() }
 
 func (*cancelOnCheckContext) Err() error { return context.Canceled }
 
@@ -1627,13 +1678,13 @@ func TestRequestSendCancellationAndStop(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	perform := func(*session) (any, error) { return nil, nil }
-	b := newBackendState(nil)
-	r := newRequest(t.Context(), perform)
-	nativeCause(t, backendSendRequest(ctx, b, &r), context.Canceled)
+	perform := func(*session) (any, error) { return struct{}{}, nil }
+	backend := newBackendState(nil)
+	job := newRequest(t.Context(), perform)
+	nativeCause(t, backendSendRequest(ctx, backend, &job), context.Canceled)
 	nativeCause(
 		t,
-		resultError(backendCall(ctx, environment, newBackendCallArguments(b, perform))),
+		resultError(backendCall(ctx, environment, newBackendCallArguments(backend, perform))),
 		context.Canceled,
 	)
 }
@@ -1641,13 +1692,13 @@ func TestRequestSendCancellationAndStop(t *testing.T) {
 func TestRequestStoppedBackend(t *testing.T) {
 	t.Parallel()
 
-	perform := func(*session) (any, error) { return nil, nil }
-	b := newBackendState(nil)
-	r := newRequest(t.Context(), perform)
+	perform := func(*session) (any, error) { return struct{}{}, nil }
+	backend := newBackendState(nil)
+	job := newRequest(t.Context(), perform)
 
-	close(b.stop)
-	nativeCause(t, backendSendRequest(t.Context(), b, &r), domain.ErrClosed)
-	nativeCause(t, resultError(submitRequest(t.Context(), b, perform)), domain.ErrClosed)
+	close(backend.stop)
+	nativeCause(t, backendSendRequest(t.Context(), backend, &job), domain.ErrClosed)
+	nativeCause(t, resultError(submitRequest(t.Context(), backend, perform)), domain.ErrClosed)
 }
 
 func TestRequestCompletedBackend(t *testing.T) {
@@ -1655,19 +1706,20 @@ func TestRequestCompletedBackend(t *testing.T) {
 
 	environment := fakeNativeState()
 
-	r := newRequest(t.Context(), func(*session) (any, error) { return nil, nil })
+	job := newRequest(t.Context(), func(*session) (any, error) { return struct{}{}, nil })
 
-	b := newBackendState(nil)
-	close(b.done)
-	nativeCause(t, backendSendRequest(t.Context(), b, &r), domain.ErrClosed)
+	backend := newBackendState(nil)
+	args := newBackendAwaitResponseArguments(backend, &job)
+	close(backend.done)
+	nativeCause(t, backendSendRequest(t.Context(), backend, &job), domain.ErrClosed)
 	nativeCause(
 		t,
-		resultError(
-			backendAwaitResponse(t.Context(), environment, newBackendAwaitResponseArguments(b, &r)),
-		),
+		resultError(backendAwaitResponse(t.Context(), environment, args)),
 		domain.ErrClosed,
 	)
-	backendDiscardResponse(t.Context(), environment, newBackendDiscardResponseArguments(b, &r))
+
+	discard := newBackendDiscardResponseArguments(backend, &job)
+	backendDiscardResponse(t.Context(), environment, discard)
 }
 
 func TestRequestCanceledReadyNotification(t *testing.T) {
@@ -1678,12 +1730,12 @@ func TestRequestCanceledReadyNotification(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	b := newBackendState(nil)
-	close(b.done)
+	backend := newBackendState(nil)
+	close(backend.done)
 
-	b.ready <- nil
+	backend.ready <- nil
 
-	nativeCause(t, resultError(backendAwaitReady(ctx, environment, b)), context.Canceled)
+	nativeCause(t, resultError(backendAwaitReady(ctx, environment, backend)), context.Canceled)
 }
 
 func TestRequestCanceledResponse(t *testing.T) {
@@ -1694,17 +1746,16 @@ func TestRequestCanceledResponse(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	r := newRequest(t.Context(), func(*session) (any, error) { return nil, nil })
+	job := newRequest(t.Context(), func(*session) (any, error) { return struct{}{}, nil })
 
-	b := newBackendState(nil)
+	backend := newBackendState(nil)
+	args := newBackendAwaitResponseArguments(backend, &job)
 	nativeCause(
 		t,
-		resultError(
-			backendAwaitResponse(ctx, environment, newBackendAwaitResponseArguments(b, &r)),
-		),
+		resultError(backendAwaitResponse(ctx, environment, args)),
 		context.Canceled,
 	)
-	close(b.done)
+	close(backend.done)
 }
 
 func TestRequestDiscardMalformedResponse(t *testing.T) {
@@ -1712,17 +1763,18 @@ func TestRequestDiscardMalformedResponse(t *testing.T) {
 
 	environment := fakeNativeState()
 
-	r := newRequest(t.Context(), func(*session) (any, error) { return nil, nil })
+	job := newRequest(t.Context(), func(*session) (any, error) { return struct{}{}, nil })
 
 	// The discarded response carries no capture and therefore needs no native cleanup.
-	b := newBackendState(nil)
+	backend := newBackendState(nil)
 
-	r.result <- response{value: "wrong type", err: nil}
+	job.result <- response{value: testWrongType, err: nil}
 
-	backendDiscardResponse(t.Context(), environment, newBackendDiscardResponseArguments(b, &r))
+	discard := newBackendDiscardResponseArguments(backend, &job)
+	backendDiscardResponse(t.Context(), environment, discard)
 	nativeCause(
 		t,
-		resultError(openedCapture(t.Context(), environment, "wrong type")),
+		resultError(openedCapture(t.Context(), environment, testWrongType)),
 		domain.ErrUnsupported,
 	)
 }
@@ -1732,7 +1784,7 @@ func TestCaptureCloseAndDiscard(t *testing.T) {
 
 	environment := fakeNativeState()
 	s := newSession(newBackendState(nil))
-	device := newCaptureState(s, nativeZero, &callbackSink{})
+	device := newCaptureState(s, nativeZero, &callbackSink{failure: nil})
 
 	go serveNativeRequest(s)
 
@@ -1748,10 +1800,10 @@ func TestCaptureCloseAfterShutdown(t *testing.T) {
 
 	environment := fakeNativeState()
 
-	b := newBackendState(nil)
-	close(b.done)
+	backend := newBackendState(nil)
+	close(backend.done)
 
-	device := newCaptureState(newSession(b), nativeZero, &callbackSink{})
+	device := newCaptureState(newSession(backend), nativeZero, &callbackSink{failure: nil})
 	nativeCause(t, captureClose(t.Context(), environment, device), nil)
 }
 
@@ -1760,13 +1812,13 @@ func TestDiscardCaptureCleanupFailure(t *testing.T) {
 
 	environment := fakeNativeState()
 
-	b := newBackendState(nil)
-	s := newSession(b)
+	backend := newBackendState(nil)
+	s := newSession(backend)
 
-	sink := &callbackSink{}
+	sink := &callbackSink{failure: nil}
 
 	device := newCaptureState(s, nativeZero, sink)
-	// Inject a request failure to verify a discarded capture reports cleanup loss.
+	// Inject a job failure to verify a discarded capture reports cleanup loss.
 	device.closeOnce.Do(func() {})
 
 	device.closeErr = domain.ErrUnsupported
@@ -1833,7 +1885,7 @@ func nativeOpenTarget(t *testing.T, environment *nativeState, session *session) 
 	nativeCause(t, err, nil)
 	configureOwnedDeviceCreation(t, environment)
 
-	return &openTarget{id: infos[nativeZero].ID, sink: &callbackSink{}}
+	return &openTarget{id: infos[nativeZero].ID, sink: &callbackSink{failure: nil}}
 }
 
 func serveNativeOpenAndClose(session *session) {
@@ -1876,5 +1928,48 @@ func TestCanceledQueuedCommandDoesNotExecute(t *testing.T) {
 
 	if reply := <-result; !errors.Is(reply.err, context.Canceled) || reply.value != nil {
 		t.Fatalf("canceled reply = (%v, %v)", reply.value, reply.err)
+	}
+}
+
+func newNativeTestState() *nativeState {
+	environment := new(nativeState)
+
+	environment.core = defaultCoreAPI()
+
+	return environment
+}
+
+func checkNativeIdentifier(t *testing.T, id *uint16, value int64) {
+	t.Helper()
+
+	if value == testPropertyNumber {
+		nativeEqual(t, *id, uint16(testPropertyNumber))
+
+		return
+	}
+
+	nativeEqual(t, id == nil, true)
+}
+
+func unavailableNativeLibrary[Handle ~uintptr](string, int) (Handle, error) {
+	return Handle(nativeZero), domain.ErrUnsupported
+}
+
+func checkInvalidNativeStringLengths(t *testing.T) {
+	t.Helper()
+
+	lengths := [...]int{-nativeOne, maxNativeString}
+	for index := range lengths {
+		length := lengths[index]
+		nativeEqual(
+			t,
+
+			nativeString(length, func([]byte) bool {
+				t.Fatal("invalid length read")
+
+				return true
+			}),
+			"",
+		)
 	}
 }

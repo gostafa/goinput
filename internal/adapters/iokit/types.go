@@ -50,9 +50,7 @@ type (
 		set     cf.CFSetRef
 	}
 	deviceReference struct{ ref native.IOHIDDeviceRef }
-)
 
-type (
 	nativeCoreAPI = struct {
 		runLoop      func() cf.CFRunLoopRef
 		stringRef    func(string) cf.CFStringRef
@@ -65,18 +63,14 @@ type (
 		bind         func(uintptr, string, any) error
 		probeHID     func() (any, error)
 	}
-)
 
-type (
 	classCandidate = usageClass[domain.DeviceClass]
 
 	usageClass[Class any] struct {
 		class Class
 		usage uint32
 	}
-)
 
-type (
 	backendAwaitResponseArguments = struct {
 		backend *backend
 		request *request
@@ -176,14 +170,10 @@ type (
 		key     string
 		ref     native.IOHIDDeviceRef
 	}
-)
 
-type (
 	backendOperations = backendview.Operations[domain.DeviceInfo, domain.DeviceID, ports.EventSink, ports.Capture]
 	captureOperations = captureview.Operations[domain.DeviceInfo, domain.Capabilities]
-)
 
-type (
 	backend = backendRecord[sessionJob, ports.Retrier]
 
 	backendRecord[J, R any] struct {
@@ -387,9 +377,7 @@ type (
 		opened    bool
 		scheduled bool
 	}
-)
 
-type (
 	nativeState = nativeStateRecord[nativeAPI, machTimebase, nativeCoreAPI]
 
 	nativeStateRecord[API, Clock, Core any] struct {
@@ -407,8 +395,6 @@ type (
 		removalCallback      uintptr
 		symbolOnce           sync.Once
 	}
-)
 
-type (
 	metadataView[T any] func() T
 )

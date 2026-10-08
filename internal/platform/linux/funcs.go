@@ -7,7 +7,8 @@ package linux
 
 import (
 	"github.com/gostafa/goinput/internal/adapters/evdev"
+	"github.com/gostafa/goinput/internal/ports"
 )
 
 // Factory creates an independently owned native backend factory.
-func init() { Factory = evdev.Factory }
+func Factory() ports.Factory { return evdev.Factory() }

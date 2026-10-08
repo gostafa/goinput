@@ -18,9 +18,7 @@ type (
 	deviceOperations[I, C, E any]   = deviceview.Operations[I, C, E]
 	managerOperations[I, ID, D any] = managerview.Operations[I, ID, D]
 	sinkOperations[E any]           = sinkview.Operations[E]
-)
 
-type (
 	// Device is a concurrency-safe event consumer. Concurrent readers share one
 	// ordered queue: events are consumed once, rather than broadcast to readers.
 	Device interface {

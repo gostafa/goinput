@@ -15,6 +15,34 @@ import (
 	captureview "github.com/gostafa/goinput/internal/ports/capture"
 )
 
+type (
+	testBackendOperations = backendview.Operations[domain.DeviceInfo, domain.DeviceID, ports.EventSink, ports.Capture]
+
+	testBackend struct {
+		*testBackendOperations
+
+		closes int
+	}
+
+	appFixture = struct {
+		manager *Manager
+		backend *testBackend
+		capture *captureview.Operations[domain.DeviceInfo, domain.Capabilities]
+		sink    ports.EventSink
+	}
+)
+
+const (
+	backendClosedMessage  = "backend closed %d times, want once"
+	publishFailureMessage = "publish failed"
+	testDeviceID          = "test-device"
+	testQueueCapacity     = 2
+	firstTestValue        = 1
+	thirdTestValue        = 3
+	fourthTestValue       = 4
+	testEmptyBuffer       = 0
+)
+
 func TestManagerLifetimeCancellationReachesOperation(t *testing.T) {
 	t.Parallel()
 
@@ -59,27 +87,6 @@ func canceledOperation(ctx context.Context) (bool, error) {
 
 	return false, errors.Join(context.Cause(ctx))
 }
-
-type (
-	testBackendOperations = backendview.Operations[domain.DeviceInfo, domain.DeviceID, ports.EventSink, ports.Capture]
-
-	testBackend struct {
-		*testBackendOperations
-
-		closes int
-	}
-)
-
-const (
-	backendClosedMessage  = "backend closed %d times, want once"
-	publishFailureMessage = "publish failed"
-	testDeviceID          = "test-device"
-	testQueueCapacity     = 2
-	firstTestValue        = 1
-	thirdTestValue        = 3
-	fourthTestValue       = 4
-	testEmptyBuffer       = 0
-)
 
 func (backend *testBackend) Close() error {
 	backend.closes++
@@ -244,15 +251,6 @@ func testEvent(value float64) *domain.Event {
 
 	return &event
 }
-
-type (
-	appFixture = struct {
-		manager *Manager
-		backend *testBackend
-		capture *captureview.Operations[domain.DeviceInfo, domain.Capabilities]
-		sink    ports.EventSink
-	}
-)
 
 func lifecycleFixture(t *testing.T) *appFixture {
 	t.Helper()

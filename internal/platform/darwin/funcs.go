@@ -7,7 +7,8 @@ package darwin
 
 import (
 	"github.com/gostafa/goinput/internal/adapters/iokit"
+	"github.com/gostafa/goinput/internal/ports"
 )
 
 // Factory creates an independently owned native backend factory.
-func init() { Factory = iokit.Factory }
+func Factory() ports.Factory { return iokit.Factory() }

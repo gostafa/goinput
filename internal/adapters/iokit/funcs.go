@@ -1006,7 +1006,9 @@ func backendDiscoverDevices(
 		return nil, fmt.Errorf("discoverDevices: %w", err)
 	}
 
-	return discoveredDevices(result.value)
+	devices, err := discoveredDevices(result.value)
+
+	return devices, errors.Join(err)
 }
 
 func discoveredDevices(value any) ([]domain.DeviceInfo, error) {
@@ -1019,13 +1021,15 @@ func discoveredDevices(value any) ([]domain.DeviceInfo, error) {
 }
 
 func setDevices(set cf.CFSetRef, count int) ([]native.IOHIDDeviceRef, error) {
-	return readSetDevices(count, func(values []uintptr) error {
+	devices, err := readSetDevices(count, func(values []uintptr) error {
 		return coreFoundationCall("CFSetGetValues", func(read func(cf.CFSetRef, *uintptr)) error {
 			read(set, &values[nativeZero])
 
 			return nil
 		})
 	})
+
+	return devices, errors.Join(err)
 }
 
 func readSetDevices(count int, read func([]uintptr) error) ([]native.IOHIDDeviceRef, error) {

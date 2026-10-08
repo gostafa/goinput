@@ -111,7 +111,11 @@ func TestReportResultSelectsFailureExit(t *testing.T) {
 
 	calls := testEmpty
 
-	exit := func(code int) { checkValue(t, code, exitFailure); calls++ }
+	exit := func(code int) {
+		checkValue(t, code, exitFailure)
+
+		calls++
+	}
 
 	reportResult(t.Context(), nil, exit)
 	reportResult(t.Context(), flag.ErrHelp, exit)

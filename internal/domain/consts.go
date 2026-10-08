@@ -500,8 +500,6 @@ const (
 	KeyStop           Usage = 0x000c00b7
 	hatFourPositions  int64 = 4
 	hatEightPositions int64 = 8
-)
 
-const (
 	normalizedMinimum = float64(UsageUnknown)
 )

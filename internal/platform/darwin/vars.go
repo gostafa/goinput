@@ -1,6 +1,8 @@
 // Gostafa 2026.
 // SPDX-License-Identifier: Apache-2.0.
 
+//go:build !darwin || (!amd64 && !arm64)
+
 package darwin
 
 import (
@@ -8,4 +10,4 @@ import (
 )
 
 // Factory selects a native backend factory, or nil on unsupported targets.
-var Factory = func() ports.Factory { return nil }
+func Factory() ports.Factory { return nil }

@@ -29,6 +29,8 @@ const (
 	hatTestMaximum     = 7
 	axisTestLimit      = 10
 	axisOutsideLimit   = 11
+
+	invalidBufferSize = -1
 )
 
 func TestNormalizeRange(t *testing.T) {
@@ -127,10 +129,6 @@ func checkNormalization(t *testing.T, control *subject.Control, example *normali
 		)
 	}
 }
-
-const (
-	invalidBufferSize = -1
-)
 
 func TestSystemCreatesLazyManager(t *testing.T) {
 	t.Parallel()

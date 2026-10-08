@@ -17,9 +17,7 @@ type (
 		managers *int
 		duration *time.Duration
 	}
-)
 
-type (
 	captureOptions struct {
 		output   io.Writer
 		logger   *slog.Logger

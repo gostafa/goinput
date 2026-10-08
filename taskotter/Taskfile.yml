@@ -1,5 +1,6 @@
 ---
-version: "3.5"
+version: '3.5'
+
 vars:
   ACTIONLINT_EXTRA_ARGS: '{{.ACTIONLINT_EXTRA_ARGS | default ""}}'
   ACTIONLINT_NIX_INSTALLABLE: '{{.ACTIONLINT_NIX_INSTALLABLE | default "nixpkgs#actionlint"}}'
@@ -43,6 +44,7 @@ vars:
   ZIZMOR_NIX_INSTALLABLE: '{{.ZIZMOR_NIX_INSTALLABLE | default "nixpkgs#zizmor"}}'
   ZIZMOR_TARGETS: '{{.ZIZMOR_TARGETS | default ".github"}}'
   ZIZMOR_WINGET_INSTALLABLE: '{{.ZIZMOR_WINGET_INSTALLABLE | default "zizmor.zizmor"}}'
+
 includes:
   go:
     taskfile: go/Taskfile.yml
@@ -115,6 +117,7 @@ includes:
       GO_JUNIT_REPORT_GO_PKG: '{{.GO_JUNIT_REPORT_GO_PKG}}'
       GO_JUNIT_REPORT_IN: '{{.GO_JUNIT_REPORT_IN}}'
       GO_JUNIT_REPORT_OUT: '{{.GO_JUNIT_REPORT_OUT}}'
+
 tasks:
   ci:
     desc: Run ci for synced TaskOtter modules

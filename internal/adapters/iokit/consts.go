@@ -39,13 +39,9 @@ const (
 	unitExponentModulus = 16
 
 	operationRead = "read"
-)
 
-const (
 	coreFoundationLibrary = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
-)
 
-const (
 	openErrorFormat    = "open: %w"
 	statusErrorFormat  = "%w: IOReturn 0x%08x"
 	callErrorFormat    = "call: %w"
