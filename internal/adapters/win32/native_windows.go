@@ -6,6 +6,8 @@
 package win32
 
 import (
+	"syscall"
+
 	native "github.com/deploymenttheory/go-bindings-win32/bindings/runtime/win32"
 	hid "github.com/deploymenttheory/go-bindings-win32/bindings/win32/devices/humaninterfacedevice"
 	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/foundation"
@@ -14,7 +16,6 @@ import (
 	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/system/threading"
 	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/ui/input"
 	wm "github.com/deploymenttheory/go-bindings-win32/bindings/win32/ui/windowsandmessaging"
-	"syscall"
 )
 
 // Native calls are bound once in production; serial Windows tests replace them

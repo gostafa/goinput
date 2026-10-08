@@ -109,9 +109,13 @@ func testNativeInput(t *testing.T) {
 	assertCoreError(t, err, domain.ErrEventLoss)
 	_, err = readInputBuffer(0, 24)
 	assertCoreError(t, err, domain.ErrEventLoss)
-	replaceNative(t, &winGetRawInputData, func(input.HRAWINPUT, input.RAW_INPUT_DATA_COMMAND_FLAGS, unsafe.Pointer, *uint32, uint32) uint32 {
-		return 25
-	})
+	replaceNative(
+		t,
+		&winGetRawInputData,
+		func(input.HRAWINPUT, input.RAW_INPUT_DATA_COMMAND_FLAGS, unsafe.Pointer, *uint32, uint32) uint32 {
+			return 25
+		},
+	)
 	_, err = readInputBuffer(0, 24)
 	assertCoreError(t, err, domain.ErrEventLoss)
 }
@@ -129,8 +133,22 @@ func testNativeHID(t *testing.T) {
 	assertCoreEqual(t, subscription.closed.Load(), true)
 	subscription = fixture.capture(t, 2)
 	button := hid.HIDP_BUTTON_CAPS{UsagePage: 9, ReportID: 1, IsAbsolute: 1}
-	axis := hid.HIDP_VALUE_CAPS{UsagePage: 1, ReportID: 1, IsAbsolute: 1, BitSize: 8, LogicalMax: 255}
-	builder := &hidBuilder{descriptor: &descriptor{preparsed: []byte{1}, reportLen: 2, maxData: 4, controls: make(map[hidIndex]hidControl), reportIDs: make(map[byte]bool)}}
+	axis := hid.HIDP_VALUE_CAPS{
+		UsagePage:  1,
+		ReportID:   1,
+		IsAbsolute: 1,
+		BitSize:    8,
+		LogicalMax: 255,
+	}
+	builder := &hidBuilder{
+		descriptor: &descriptor{
+			preparsed: []byte{1},
+			reportLen: 2,
+			maxData:   4,
+			controls:  make(map[hidIndex]hidControl),
+			reportIDs: make(map[byte]bool),
+		},
+	}
 	buttonCtrl, axisCtrl := makeHIDButton(&button, 1, 1), makeHIDValue(&axis, 48, 2)
 	hidBuilderAdd(builder, &buttonCtrl)
 	hidBuilderAdd(builder, &axisCtrl)
@@ -152,7 +170,11 @@ func testNativeHID(t *testing.T) {
 	assertCoreEqual(t, len(fixture.events), 3)
 	assertCoreEqual(t, fixture.events[2].Action, domain.ActionRelease)
 	axisCtrl.control.Mode = domain.AxisRelative
-	captureEmitHIDValue(subscription, &axisCtrl.control, &captureEmitHIDValueArguments{value: 42, stamp: stamp})
+	captureEmitHIDValue(
+		subscription,
+		&axisCtrl.control,
+		&captureEmitHIDValueArguments{value: 42, stamp: stamp},
+	)
 	assertCoreEqual(t, len(fixture.events), 4)
 	body[8] = 2
 	captureReports(subscription, body, stamp)
@@ -187,7 +209,11 @@ func testNativeHID(t *testing.T) {
 	assertCoreEqual(t, valid, true)
 	assertCoreEqual(t, direction, int64(domain.HatNorthEast))
 	state := &hidReportState{reportID: 1, pressed: make(map[domain.ControlID]bool)}
-	captureProcessHIDControl(subscription, &axisCtrl, &captureProcessHIDControlArguments{word: 99, state: state})
+	captureProcessHIDControl(
+		subscription,
+		&axisCtrl,
+		&captureProcessHIDControlArguments{word: 99, state: state},
+	)
 	unsupported := axisCtrl
 	unsupported.control.Support = domain.SupportUnsupported
 	subscription.hid.controls[hidDataIndex(1, 3)] = unsupported

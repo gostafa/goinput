@@ -34,12 +34,23 @@ func testNativeCapabilities(t *testing.T) {
 	assertCoreEqual(t, mouse.caps.Controls[0].Support, domain.SupportSupported)
 	assertCoreEqual(t, mouse.caps.Controls[4].Support, domain.SupportUnknown)
 	assertCoreEqual(t, mouse.caps.Controls[10].Support, domain.SupportSupported)
-	assertCoreError(t, captureLoadCapabilities(t.Context(), fixture.capture(t, 3)), domain.ErrUnsupported)
+	assertCoreError(
+		t,
+		captureLoadCapabilities(t.Context(), fixture.capture(t, 3)),
+		domain.ErrUnsupported,
+	)
 
 	subscription := fixture.capture(t, 2)
 	button := hid.HIDP_BUTTON_CAPS{UsagePage: 9, ReportID: 1, IsAbsolute: 1}
 	button.Anonymous.Data[0], button.Anonymous.Data[6] = 1, 1
-	axis := hid.HIDP_VALUE_CAPS{UsagePage: 1, ReportID: 1, BitSize: 8, ReportCount: 1, IsAbsolute: 1, LogicalMax: 255}
+	axis := hid.HIDP_VALUE_CAPS{
+		UsagePage:   1,
+		ReportID:    1,
+		BitSize:     8,
+		ReportCount: 1,
+		IsAbsolute:  1,
+		LogicalMax:  255,
+	}
 	axis.Anonymous.Data[0], axis.Anonymous.Data[6] = 48, 2
 	fixture.buttons, fixture.values = []hid.HIDP_BUTTON_CAPS{button}, []hid.HIDP_VALUE_CAPS{axis}
 	fixture.caps.NumberInputButtonCaps, fixture.caps.NumberInputValueCaps = 1, 1
@@ -81,10 +92,14 @@ func testNativeCapabilities(t *testing.T) {
 	_, err = captureReadPreparsedBuffer(subscription, 1)
 	assertCoreError(t, err, domain.ErrUnsupported)
 	fixture.err = nil
-	replaceNative(t, &winGetRawInputDeviceInfo, func(_ foundation.HANDLE, _ input.RAW_INPUT_DEVICE_INFO_COMMAND, _ unsafe.Pointer, count *uint32) (uint32, error) {
-		*count = 0
-		return 0, nil
-	})
+	replaceNative(
+		t,
+		&winGetRawInputDeviceInfo,
+		func(_ foundation.HANDLE, _ input.RAW_INPUT_DEVICE_INFO_COMMAND, _ unsafe.Pointer, count *uint32) (uint32, error) {
+			*count = 0
+			return 0, nil
+		},
+	)
 	_, err = captureReadPreparsedData(subscription)
 	assertCoreError(t, err, domain.ErrUnsupported)
 	assertTrimmed(t)
@@ -109,23 +124,45 @@ func assertTrimmed(t *testing.T) {
 
 func assertCapabilityBounds(t *testing.T) {
 	t.Helper()
-	values, err := readCapabilities(0, func(*byte, *uint16) foundation.NTSTATUS { t.Fatal("zero count called driver"); return 0 })
+	values, err := readCapabilities(
+		0,
+		func(*byte, *uint16) foundation.NTSTATUS { t.Fatal("zero count called driver"); return 0 },
+	)
 	nativeOK(t, err)
 	assertCoreEqual(t, len(values), 0)
 	_, err = readCapabilities(1, func(*byte, *uint16) foundation.NTSTATUS { return 0 })
 	assertCoreError(t, err, domain.ErrUnsupported)
-	_, err = readCapabilities(1, func(_ *byte, count *uint16) foundation.NTSTATUS { *count = 2; return hid.HIDP_STATUS_SUCCESS })
+	_, err = readCapabilities(
+		1,
+		func(_ *byte, count *uint16) foundation.NTSTATUS { *count = 2; return hid.HIDP_STATUS_SUCCESS },
+	)
 	assertCoreError(t, err, domain.ErrEventLoss)
-	values, err = readCapabilities(1, func(first *byte, _ *uint16) foundation.NTSTATUS { *first = 42; return hid.HIDP_STATUS_SUCCESS })
+	values, err = readCapabilities(
+		1,
+		func(first *byte, _ *uint16) foundation.NTSTATUS { *first = 42; return hid.HIDP_STATUS_SUCCESS },
+	)
 	nativeOK(t, err)
 	nativeEqual(t, values, []byte{42})
-	assertCoreError(t, addCapabilities([]byte{1}, func(*byte) error { return domain.ErrUnsupported }), domain.ErrUnsupported)
-	builder := &hidBuilder{descriptor: &descriptor{controls: make(map[hidIndex]hidControl), reportIDs: make(map[byte]bool)}}
+	assertCoreError(
+		t,
+		addCapabilities([]byte{1}, func(*byte) error { return domain.ErrUnsupported }),
+		domain.ErrUnsupported,
+	)
+	builder := &hidBuilder{
+		descriptor: &descriptor{
+			controls:  make(map[hidIndex]hidControl),
+			reportIDs: make(map[byte]bool),
+		},
+	}
 	control := hidControl{native: ext.NativeControl{ReportID: 1, DataIndex: 2}}
 	hidBuilderAdd(builder, &control)
 	hidBuilderAdd(builder, &control)
 	assertCoreEqual(t, len(builder.controls), 1)
-	addCapabilityRange(builder, &capabilityRange{firstUsage: 2, lastUsage: 1}, func(uint32, uint32) hidControl { t.Fatal("reversed span iterated"); return hidControl{} })
+	addCapabilityRange(
+		builder,
+		&capabilityRange{firstUsage: 2, lastUsage: 1},
+		func(uint32, uint32) hidControl { t.Fatal("reversed span iterated"); return hidControl{} },
+	)
 	nativeOK(t, addNativeCapability(builder, &nativeCapability{alias: 1}))
 }
 
