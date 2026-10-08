@@ -9,7 +9,9 @@ import (
 	"context"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
+	hid "github.com/deploymenttheory/go-bindings-win32/bindings/win32/devices/humaninterfacedevice"
 	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/foundation"
 	ext "github.com/gostafa/goinput/extensions/win32"
 	"github.com/gostafa/goinput/internal/domain"
@@ -17,6 +19,71 @@ import (
 )
 
 type (
+	commandWait struct {
+		command     *command
+		contextDone <-chan struct{}
+		complete    bool
+		err         error
+	}
+	deviceSnapshot struct {
+		devices     []nativeDevice
+		diagnostics error
+	}
+	errorCategory struct {
+		native error
+		domain error
+	}
+	inputPacket struct {
+		kind   uint32
+		device foundation.HANDLE
+		body   []byte
+		stamp  domain.Timestamp
+	}
+	keyboardInput struct {
+		makeCode   uint16
+		flags      uint16
+		virtualKey uint16
+	}
+	mouseInput struct {
+		flags   uint16
+		buttons uint16
+		wheel   int16
+		x       int64
+		y       int64
+		stamp   domain.Timestamp
+	}
+	reportBatch struct {
+		size  uint32
+		count uint32
+		stamp domain.Timestamp
+	}
+	hidReportState struct {
+		reportID byte
+		stamp    domain.Timestamp
+		pressed  map[domain.ControlID]bool
+	}
+	hidBuilder struct {
+		descriptor     *descriptor
+		caps           hid.HIDP_CAPS
+		controls       []domain.Control
+		nativeControls []ext.NativeControl
+	}
+	capabilityRange struct {
+		firstUsage uint32
+		lastUsage  uint32
+		firstIndex uint32
+		lastIndex  uint32
+	}
+	nativeBuffer struct {
+		data unsafe.Pointer
+		size *uint32
+	}
+	windowMessage struct {
+		hwnd    foundation.HWND
+		message uint32
+		wParam  foundation.WPARAM
+		lParam  foundation.LPARAM
+	}
 	backend struct {
 		mu            sync.Mutex
 		hwnd          foundation.HWND
