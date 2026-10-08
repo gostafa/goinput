@@ -24,7 +24,11 @@ func testNativeLateFailures(t *testing.T) {
 	subscription := fixture.capture(t, 2)
 	fixture.inventory = []input.RAWINPUTDEVICELIST{{HDevice: 1, DwType: input.RIM_TYPEHID}}
 	fixture.status = 0
-	_, err := backendOpen(t.Context(), owner, &backendOpenArguments{id: "win32:test-device", sink: subscription.sink})
+	_, err := backendOpen(
+		t.Context(),
+		owner,
+		&backendOpenArguments{id: "win32:test-device", sink: subscription.sink},
+	)
 	assertCoreError(t, err, domain.ErrUnsupported)
 	fixture.status = hid.HIDP_STATUS_SUCCESS
 	fixture.err = domain.ErrUnsupported
@@ -32,9 +36,13 @@ func testNativeLateFailures(t *testing.T) {
 	assertCoreError(t, captureLoadHIDCapabilities(t.Context(), subscription), domain.ErrUnsupported)
 	fixture.err = nil
 	fixture.caps.NumberInputButtonCaps = 1
-	replaceNative(t, &winHidP_GetButtonCaps, func(hid.HIDP_REPORT_TYPE, *hid.HIDP_BUTTON_CAPS, *uint16, hid.PHIDP_PREPARSED_DATA) foundation.NTSTATUS {
-		return 0
-	})
+	replaceNative(
+		t,
+		&winHidP_GetButtonCaps,
+		func(hid.HIDP_REPORT_TYPE, *hid.HIDP_BUTTON_CAPS, *uint16, hid.PHIDP_PREPARSED_DATA) foundation.NTSTATUS {
+			return 0
+		},
+	)
 	assertCoreError(t, captureBuildHIDCapabilities(subscription, []byte{1}), domain.ErrUnsupported)
 
 	owner = fixtureBackend(t)
@@ -43,8 +51,16 @@ func testNativeLateFailures(t *testing.T) {
 	subscription = backendMakeCapture(owner, device, subscription.sink)
 	nativeOK(t, subscription.backend.retry(t.Context(), func(context.Context) error { return nil }))
 	ctx, cancel := context.WithCancel(t.Context())
-	replaceNative(t, &winRegisterRawInputDevices, func([]input.RAWINPUTDEVICE, uint32) error { cancel(); return nil })
-	replaceNative(t, &winSetEvent, func(foundation.HANDLE) error { go backendDrainCommands(owner); return nil })
+	replaceNative(
+		t,
+		&winRegisterRawInputDevices,
+		func([]input.RAWINPUTDEVICE, uint32) error { cancel(); return nil },
+	)
+	replaceNative(
+		t,
+		&winSetEvent,
+		func(foundation.HANDLE) error { go backendDrainCommands(owner); return nil },
+	)
 	_, err = completeCaptureOpen(ctx, owner, subscription)
 	assertCoreError(t, err, context.Canceled)
 	assertCoreEqual(t, subscription.closed.Load(), true)

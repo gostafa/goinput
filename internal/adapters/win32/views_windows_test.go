@@ -40,7 +40,11 @@ func testNativeViews(t *testing.T) {
 	_, err = view.Open(t.Context(), "missing", subscription.sink)
 	assertCoreError(t, err, domain.ErrNotFound)
 	fixture.err = domain.ErrUnsupported
-	_, err = backendOpen(t.Context(), owner, &backendOpenArguments{id: infos[0].ID, sink: subscription.sink})
+	_, err = backendOpen(
+		t.Context(),
+		owner,
+		&backendOpenArguments{id: infos[0].ID, sink: subscription.sink},
+	)
 	assertCoreError(t, err, domain.ErrUnsupported)
 	fixture.err = nil
 	subscription.device.kind = 3

@@ -21,7 +21,11 @@ import (
 
 type nativeRetrier struct{ calls int }
 
-func (retry *nativeRetrier) Do(ctx context.Context, operation func(context.Context) error, transient func(error) bool) error {
+func (retry *nativeRetrier) Do(
+	ctx context.Context,
+	operation func(context.Context) error,
+	transient func(error) bool,
+) error {
 	retry.calls++
 	return operation(ctx)
 }
@@ -40,7 +44,10 @@ func testNativeInventory(t *testing.T) {
 	infos, err := backendDiscover(t.Context(), owner)
 	nativeOK(t, err)
 	assertCoreEqual(t, len(infos), 0)
-	fixture.inventory = []input.RAWINPUTDEVICELIST{{HDevice: 1, DwType: input.RIM_TYPEKEYBOARD}, {HDevice: 2, DwType: input.RIM_TYPEMOUSE}}
+	fixture.inventory = []input.RAWINPUTDEVICELIST{
+		{HDevice: 1, DwType: input.RIM_TYPEKEYBOARD},
+		{HDevice: 2, DwType: input.RIM_TYPEMOUSE},
+	}
 	infos, err = backendDiscover(t.Context(), owner)
 	nativeOK(t, err)
 	assertCoreEqual(t, len(infos), 2)
@@ -72,16 +79,32 @@ func testNativeInventory(t *testing.T) {
 	nativeOK(t, backendRetry(t.Context(), owner, func(context.Context) error { return nil }))
 	assertCoreEqual(t, retry.calls, 1)
 
-	_, err = readDeviceInventory(0, 1, func(uint32, uint32) ([]byte, error) { t.Fatal("empty inventory read"); return nil, nil })
+	_, err = readDeviceInventory(
+		0,
+		1,
+		func(uint32, uint32) ([]byte, error) { t.Fatal("empty inventory read"); return nil, nil },
+	)
 	nativeOK(t, err)
-	_, err = readDeviceInventory(maxDevices+1, 1, func(uint32, uint32) ([]byte, error) { t.Fatal("oversized inventory read"); return nil, nil })
+	_, err = readDeviceInventory(
+		maxDevices+1,
+		1,
+		func(uint32, uint32) ([]byte, error) { t.Fatal("oversized inventory read"); return nil, nil },
+	)
 	assertCoreError(t, err, domain.ErrInvalidOptions)
-	replaceNative(t, &winGetRawInputDeviceList, func(*input.RAWINPUTDEVICELIST, *uint32, uint32) (uint32, error) { return 2, nil })
+	replaceNative(
+		t,
+		&winGetRawInputDeviceList,
+		func(*input.RAWINPUTDEVICELIST, *uint32, uint32) (uint32, error) { return 2, nil },
+	)
 	_, err = readRawDeviceList(1, 1)
 	assertCoreError(t, err, domain.ErrInvalidOptions)
-	replaceNative(t, &winGetRawInputDeviceList, func(*input.RAWINPUTDEVICELIST, *uint32, uint32) (uint32, error) {
-		return infiniteWait, domain.ErrUnsupported
-	})
+	replaceNative(
+		t,
+		&winGetRawInputDeviceList,
+		func(*input.RAWINPUTDEVICELIST, *uint32, uint32) (uint32, error) {
+			return infiniteWait, domain.ErrUnsupported
+		},
+	)
 	_, err = readRawDeviceList(1, 1)
 	assertCoreError(t, err, domain.ErrUnsupported)
 }
@@ -109,8 +132,19 @@ func testNativeRegistration(t *testing.T) {
 	assertCoreError(t, backendAcquireRegistration(owner, usage), domain.ErrRegistrationConflict)
 	assertCoreError(t, captureRegister(owner, subscription), domain.ErrRegistrationConflict)
 	assertCoreError(t, backendRemoveRegistration(owner, usage), domain.ErrRegistrationConflict)
-	assertCoreEqual(t, matchesRegistration(usage, input.RAWINPUTDEVICE{UsUsagePage: 1, DwFlags: input.RAWINPUTDEVICE_FLAGS(32)}), true)
-	assertCoreEqual(t, matchesRegistration(usage, input.RAWINPUTDEVICE{UsUsagePage: 9, UsUsage: 2}), false)
+	assertCoreEqual(
+		t,
+		matchesRegistration(
+			usage,
+			input.RAWINPUTDEVICE{UsUsagePage: 1, DwFlags: input.RAWINPUTDEVICE_FLAGS(32)},
+		),
+		true,
+	)
+	assertCoreEqual(
+		t,
+		matchesRegistration(usage, input.RAWINPUTDEVICE{UsUsagePage: 9, UsUsage: 2}),
+		false,
+	)
 	nativeOK(t, backendRemoveRegistration(owner, topLevel{1, 6}))
 	fixture.err = domain.ErrUnsupported
 	assertCoreError(t, backendAcquireRegistration(owner, usage), domain.ErrUnsupported)
@@ -122,10 +156,18 @@ func testNativeRegistration(t *testing.T) {
 	_, err := readRegisteredDevices(1, 1)
 	assertCoreError(t, err, domain.ErrUnsupported)
 	fixture.err = nil
-	replaceNative(t, &winGetRegisteredRawInputDevices, func(*input.RAWINPUTDEVICE, *uint32, uint32) (uint32, error) { return infiniteWait, nil })
+	replaceNative(
+		t,
+		&winGetRegisteredRawInputDevices,
+		func(*input.RAWINPUTDEVICE, *uint32, uint32) (uint32, error) { return infiniteWait, nil },
+	)
 	_, err = registeredDevices()
 	assertCoreError(t, err, syscall.EINVAL)
-	replaceNative(t, &winGetRegisteredRawInputDevices, func(*input.RAWINPUTDEVICE, *uint32, uint32) (uint32, error) { return 2, nil })
+	replaceNative(
+		t,
+		&winGetRegisteredRawInputDevices,
+		func(*input.RAWINPUTDEVICE, *uint32, uint32) (uint32, error) { return 2, nil },
+	)
 	_, err = readRegisteredDevices(1, 1)
 	assertCoreError(t, err, domain.ErrInvalidOptions)
 
@@ -169,26 +211,46 @@ func testNativeMetadata(t *testing.T) {
 	assertCoreError(t, err, domain.ErrUnsupported)
 	nativeOK(t, enrichIdentity(device))
 	fixture.err = nil
-	replaceNative(t, &winCreateFile, func(string, uint32, filesystem.FILE_SHARE_MODE, *security.SECURITY_ATTRIBUTES, filesystem.FILE_CREATION_DISPOSITION, filesystem.FILE_FLAGS_AND_ATTRIBUTES, foundation.HANDLE) (foundation.HANDLE, error) {
-		return 0, domain.ErrUnsupported
-	})
+	replaceNative(
+		t,
+		&winCreateFile,
+		func(string, uint32, filesystem.FILE_SHARE_MODE, *security.SECURITY_ATTRIBUTES, filesystem.FILE_CREATION_DISPOSITION, filesystem.FILE_FLAGS_AND_ATTRIBUTES, foundation.HANDLE) (foundation.HANDLE, error) {
+			return 0, domain.ErrUnsupported
+		},
+	)
 	nativeOK(t, enrichIdentity(device))
 
 	fixture.path = ""
 	_, err = readDeviceName(0, 2)
 	assertCoreError(t, err, domain.ErrNotFound)
-	replaceNative(t, &winGetRawInputDeviceInfo, func(foundation.HANDLE, input.RAW_INPUT_DEVICE_INFO_COMMAND, unsafe.Pointer, *uint32) (uint32, error) {
-		return 0, nil
-	})
+	replaceNative(
+		t,
+		&winGetRawInputDeviceInfo,
+		func(foundation.HANDLE, input.RAW_INPUT_DEVICE_INFO_COMMAND, unsafe.Pointer, *uint32) (uint32, error) {
+			return 0, nil
+		},
+	)
 	_, err = readDevicePath(0)
 	assertCoreError(t, err, domain.ErrNotFound)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	assertCoreError(t, enrichDeviceIdentity(ctx, device), context.Canceled)
-	assertCoreEqual(t, readHIDString(0, func(foundation.HANDLE, []byte) foundation.BOOLEAN { return 0 }), "")
-	replaceNative(t, &winHidD_GetAttributes, func(foundation.HANDLE, *hid.HIDD_ATTRIBUTES) foundation.BOOLEAN { return 0 })
+	assertCoreEqual(
+		t,
+		readHIDString(0, func(foundation.HANDLE, []byte) foundation.BOOLEAN { return 0 }),
+		"",
+	)
+	replaceNative(
+		t,
+		&winHidD_GetAttributes,
+		func(foundation.HANDLE, *hid.HIDD_ATTRIBUTES) foundation.BOOLEAN { return 0 },
+	)
 	nativeDeviceLoadAttributes(device, 0)
-	replaceNative(t, &winHidD_GetProductString, func(foundation.HANDLE, []byte) foundation.BOOLEAN { return 0 })
+	replaceNative(
+		t,
+		&winHidD_GetProductString,
+		func(foundation.HANDLE, []byte) foundation.BOOLEAN { return 0 },
+	)
 	nativeDeviceLoadStrings(device, 0)
 	assertCoreEqual(t, device.info.Name, "")
 

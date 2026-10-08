@@ -98,116 +98,180 @@ func installWindowFixture(t *testing.T, fixture *nativeFixture) {
 		fixture.callback = value.(func(foundation.HWND, uint32, foundation.WPARAM, foundation.LPARAM) foundation.LRESULT)
 		return 1
 	})
-	replaceNative(t, &winCreateEvent, func(*security.SECURITY_ATTRIBUTES, bool, bool, *string) (foundation.HANDLE, error) {
-		return 1, fixture.err
-	})
-	replaceNative(t, &winGetModuleHandle, func(*string) (foundation.HMODULE, error) { return 1, fixture.err })
-	replaceNative(t, &winRegisterClass, func(*wm.WNDCLASSW) (uint16, error) { return 1, fixture.err })
-	replaceNative(t, &winCreateWindowEx, func(wm.WINDOW_EX_STYLE, *string, *string, wm.WINDOW_STYLE, int32, int32, int32, int32, foundation.HWND, wm.HMENU, foundation.HINSTANCE, unsafe.Pointer) (foundation.HWND, error) {
-		return 2, fixture.err
-	})
-	replaceNative(t, &winDefWindowProc, func(foundation.HWND, uint32, foundation.WPARAM, foundation.LPARAM) foundation.LRESULT { return 7 })
+	replaceNative(
+		t,
+		&winCreateEvent,
+		func(*security.SECURITY_ATTRIBUTES, bool, bool, *string) (foundation.HANDLE, error) {
+			return 1, fixture.err
+		},
+	)
+	replaceNative(
+		t,
+		&winGetModuleHandle,
+		func(*string) (foundation.HMODULE, error) { return 1, fixture.err },
+	)
+	replaceNative(
+		t,
+		&winRegisterClass,
+		func(*wm.WNDCLASSW) (uint16, error) { return 1, fixture.err },
+	)
+	replaceNative(
+		t,
+		&winCreateWindowEx,
+		func(wm.WINDOW_EX_STYLE, *string, *string, wm.WINDOW_STYLE, int32, int32, int32, int32, foundation.HWND, wm.HMENU, foundation.HINSTANCE, unsafe.Pointer) (foundation.HWND, error) {
+			return 2, fixture.err
+		},
+	)
+	replaceNative(
+		t,
+		&winDefWindowProc,
+		func(foundation.HWND, uint32, foundation.WPARAM, foundation.LPARAM) foundation.LRESULT { return 7 },
+	)
 	replaceNative(t, &winDestroyWindow, func(foundation.HWND) error { return fixture.err })
-	replaceNative(t, &winUnregisterClass, func(string, foundation.HINSTANCE) error { return fixture.err })
+	replaceNative(
+		t,
+		&winUnregisterClass,
+		func(string, foundation.HINSTANCE) error { return fixture.err },
+	)
 	replaceNative(t, &winCloseHandle, func(foundation.HANDLE) error { return fixture.err })
 	replaceNative(t, &winSetEvent, func(foundation.HANDLE) error { return fixture.err })
-	replaceNative(t, &winMsgWaitForMultipleObjectsEx, func([]foundation.HANDLE, uint32, wm.QUEUE_STATUS_FLAGS, wm.MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS) (foundation.WAIT_EVENT, error) {
-		return 1, fixture.err
-	})
-	replaceNative(t, &winPeekMessage, func(msg *wm.MSG, _ foundation.HWND, _, _ uint32, _ wm.PEEK_MESSAGE_REMOVE_TYPE) bool {
-		msg.Message = messageQuit
-		return true
-	})
+	replaceNative(
+		t,
+		&winMsgWaitForMultipleObjectsEx,
+		func([]foundation.HANDLE, uint32, wm.QUEUE_STATUS_FLAGS, wm.MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS) (foundation.WAIT_EVENT, error) {
+			return 1, fixture.err
+		},
+	)
+	replaceNative(
+		t,
+		&winPeekMessage,
+		func(msg *wm.MSG, _ foundation.HWND, _, _ uint32, _ wm.PEEK_MESSAGE_REMOVE_TYPE) bool {
+			msg.Message = messageQuit
+			return true
+		},
+	)
 	replaceNative(t, &winDispatchMessage, func(*wm.MSG) foundation.LRESULT { return 0 })
 }
 
 func installInventoryFixture(t *testing.T, fixture *nativeFixture) {
 	t.Helper()
-	replaceNative(t, &winGetRawInputDeviceList, func(first *input.RAWINPUTDEVICELIST, count *uint32, _ uint32) (uint32, error) {
-		if fixture.err != nil {
-			return infiniteWait, fixture.err
-		}
-		if first == nil {
-			*count = uint32(len(fixture.inventory))
-			return 0, nil
-		}
-		copy(unsafe.Slice(first, int(*count)), fixture.inventory)
-		return uint32(len(fixture.inventory)), nil
-	})
-	replaceNative(t, &winGetRegisteredRawInputDevices, func(first *input.RAWINPUTDEVICE, count *uint32, _ uint32) (uint32, error) {
-		if fixture.err != nil {
-			return infiniteWait, fixture.err
-		}
-		if first == nil {
-			*count = uint32(len(fixture.registrations))
-			return 0, nil
-		}
-		copy(unsafe.Slice(first, int(*count)), fixture.registrations)
-		return uint32(len(fixture.registrations)), nil
-	})
-	replaceNative(t, &winRegisterRawInputDevices, func(devices []input.RAWINPUTDEVICE, _ uint32) error {
-		if fixture.err != nil {
-			return fixture.err
-		}
-		for _, device := range devices {
-			fixture.registrations = slices.DeleteFunc(fixture.registrations, func(current input.RAWINPUTDEVICE) bool {
-				return current.UsUsagePage == device.UsUsagePage && current.UsUsage == device.UsUsage
-			})
-			if uint32(device.DwFlags)&1 == 0 {
-				fixture.registrations = append(fixture.registrations, device)
+	replaceNative(
+		t,
+		&winGetRawInputDeviceList,
+		func(first *input.RAWINPUTDEVICELIST, count *uint32, _ uint32) (uint32, error) {
+			if fixture.err != nil {
+				return infiniteWait, fixture.err
 			}
-		}
-		return nil
-	})
-	replaceNative(t, &winGetRawInputDeviceInfo, func(_ foundation.HANDLE, command input.RAW_INPUT_DEVICE_INFO_COMMAND, data unsafe.Pointer, count *uint32) (uint32, error) {
-		if fixture.err != nil {
-			return infiniteWait, fixture.err
-		}
-		switch command {
-		case deviceInfoCommand:
-			(*input.RID_DEVICE_INFO)(data).Anonymous.Data = fixture.words
-		case deviceNameCommand:
-			wide, err := syscall.UTF16FromString(fixture.path)
-			if err != nil {
-				return infiniteWait, err
-			}
-			if data == nil {
-				*count = uint32(len(wide))
+			if first == nil {
+				*count = uint32(len(fixture.inventory))
 				return 0, nil
 			}
-			copy(unsafe.Slice((*uint16)(data), int(*count)), wide)
-		default:
-			if data == nil {
-				*count = 1
+			copy(unsafe.Slice(first, int(*count)), fixture.inventory)
+			return uint32(len(fixture.inventory)), nil
+		},
+	)
+	replaceNative(
+		t,
+		&winGetRegisteredRawInputDevices,
+		func(first *input.RAWINPUTDEVICE, count *uint32, _ uint32) (uint32, error) {
+			if fixture.err != nil {
+				return infiniteWait, fixture.err
+			}
+			if first == nil {
+				*count = uint32(len(fixture.registrations))
 				return 0, nil
 			}
-			*(*byte)(data) = 1
-		}
-		return *count, nil
-	})
-	replaceNative(t, &winGetRawInputData, func(_ input.HRAWINPUT, _ input.RAW_INPUT_DATA_COMMAND_FLAGS, data unsafe.Pointer, count *uint32, _ uint32) uint32 {
-		if fixture.err != nil {
-			return infiniteWait
-		}
-		if data == nil {
-			*count = uint32(len(fixture.packet))
-			return 0
-		}
-		copy(unsafe.Slice((*byte)(data), int(*count)), fixture.packet)
-		return uint32(len(fixture.packet))
-	})
+			copy(unsafe.Slice(first, int(*count)), fixture.registrations)
+			return uint32(len(fixture.registrations)), nil
+		},
+	)
+	replaceNative(
+		t,
+		&winRegisterRawInputDevices,
+		func(devices []input.RAWINPUTDEVICE, _ uint32) error {
+			if fixture.err != nil {
+				return fixture.err
+			}
+			for _, device := range devices {
+				fixture.registrations = slices.DeleteFunc(
+					fixture.registrations,
+					func(current input.RAWINPUTDEVICE) bool {
+						return current.UsUsagePage == device.UsUsagePage &&
+							current.UsUsage == device.UsUsage
+					},
+				)
+				if uint32(device.DwFlags)&1 == 0 {
+					fixture.registrations = append(fixture.registrations, device)
+				}
+			}
+			return nil
+		},
+	)
+	replaceNative(
+		t,
+		&winGetRawInputDeviceInfo,
+		func(_ foundation.HANDLE, command input.RAW_INPUT_DEVICE_INFO_COMMAND, data unsafe.Pointer, count *uint32) (uint32, error) {
+			if fixture.err != nil {
+				return infiniteWait, fixture.err
+			}
+			switch command {
+			case deviceInfoCommand:
+				(*input.RID_DEVICE_INFO)(data).Anonymous.Data = fixture.words
+			case deviceNameCommand:
+				wide, err := syscall.UTF16FromString(fixture.path)
+				if err != nil {
+					return infiniteWait, err
+				}
+				if data == nil {
+					*count = uint32(len(wide))
+					return 0, nil
+				}
+				copy(unsafe.Slice((*uint16)(data), int(*count)), wide)
+			default:
+				if data == nil {
+					*count = 1
+					return 0, nil
+				}
+				*(*byte)(data) = 1
+			}
+			return *count, nil
+		},
+	)
+	replaceNative(
+		t,
+		&winGetRawInputData,
+		func(_ input.HRAWINPUT, _ input.RAW_INPUT_DATA_COMMAND_FLAGS, data unsafe.Pointer, count *uint32, _ uint32) uint32 {
+			if fixture.err != nil {
+				return infiniteWait
+			}
+			if data == nil {
+				*count = uint32(len(fixture.packet))
+				return 0
+			}
+			copy(unsafe.Slice((*byte)(data), int(*count)), fixture.packet)
+			return uint32(len(fixture.packet))
+		},
+	)
 	replaceNative(t, &winGetLastError, func() error { return fixture.err })
-	replaceNative(t, &winCreateFile, func(string, uint32, filesystem.FILE_SHARE_MODE, *security.SECURITY_ATTRIBUTES, filesystem.FILE_CREATION_DISPOSITION, filesystem.FILE_FLAGS_AND_ATTRIBUTES, foundation.HANDLE) (foundation.HANDLE, error) {
-		return 3, fixture.err
-	})
+	replaceNative(
+		t,
+		&winCreateFile,
+		func(string, uint32, filesystem.FILE_SHARE_MODE, *security.SECURITY_ATTRIBUTES, filesystem.FILE_CREATION_DISPOSITION, filesystem.FILE_FLAGS_AND_ATTRIBUTES, foundation.HANDLE) (foundation.HANDLE, error) {
+			return 3, fixture.err
+		},
+	)
 }
 
 func installHIDFixture(t *testing.T, fixture *nativeFixture) {
 	t.Helper()
-	replaceNative(t, &winHidD_GetAttributes, func(_ foundation.HANDLE, attributes *hid.HIDD_ATTRIBUTES) foundation.BOOLEAN {
-		attributes.VendorID, attributes.ProductID, attributes.VersionNumber = 4, 5, 6
-		return 1
-	})
+	replaceNative(
+		t,
+		&winHidD_GetAttributes,
+		func(_ foundation.HANDLE, attributes *hid.HIDD_ATTRIBUTES) foundation.BOOLEAN {
+			attributes.VendorID, attributes.ProductID, attributes.VersionNumber = 4, 5, 6
+			return 1
+		},
+	)
 	getString := func(_ foundation.HANDLE, data []byte) foundation.BOOLEAN {
 		binary.LittleEndian.PutUint16(data, 'A')
 		return 1
@@ -215,32 +279,57 @@ func installHIDFixture(t *testing.T, fixture *nativeFixture) {
 	replaceNative(t, &winHidD_GetProductString, getString)
 	replaceNative(t, &winHidD_GetManufacturerString, getString)
 	replaceNative(t, &winHidD_GetSerialNumberString, getString)
-	replaceNative(t, &winHidP_GetCaps, func(_ hid.PHIDP_PREPARSED_DATA, caps *hid.HIDP_CAPS) foundation.NTSTATUS {
-		*caps = fixture.caps
-		return fixture.status
-	})
-	replaceNative(t, &winHidP_MaxDataListLength, func(hid.HIDP_REPORT_TYPE, hid.PHIDP_PREPARSED_DATA) uint32 { return fixture.maxData })
-	replaceNative(t, &winHidP_GetButtonCaps, func(_ hid.HIDP_REPORT_TYPE, first *hid.HIDP_BUTTON_CAPS, count *uint16, _ hid.PHIDP_PREPARSED_DATA) foundation.NTSTATUS {
-		copy(unsafe.Slice(first, int(*count)), fixture.buttons)
-		*count = uint16(len(fixture.buttons))
-		return fixture.status
-	})
-	replaceNative(t, &winHidP_GetValueCaps, func(_ hid.HIDP_REPORT_TYPE, first *hid.HIDP_VALUE_CAPS, count *uint16, _ hid.PHIDP_PREPARSED_DATA) foundation.NTSTATUS {
-		copy(unsafe.Slice(first, int(*count)), fixture.values)
-		*count = uint16(len(fixture.values))
-		return fixture.status
-	})
-	replaceNative(t, &winHidP_GetData, func(_ hid.HIDP_REPORT_TYPE, first *hid.HIDP_DATA, count *uint32, _ hid.PHIDP_PREPARSED_DATA, _ foundation.PSTR, _ uint32) foundation.NTSTATUS {
-		copy(unsafe.Slice(first, int(*count)), fixture.data)
-		*count = uint32(len(fixture.data))
-		return fixture.status
-	})
+	replaceNative(
+		t,
+		&winHidP_GetCaps,
+		func(_ hid.PHIDP_PREPARSED_DATA, caps *hid.HIDP_CAPS) foundation.NTSTATUS {
+			*caps = fixture.caps
+			return fixture.status
+		},
+	)
+	replaceNative(
+		t,
+		&winHidP_MaxDataListLength,
+		func(hid.HIDP_REPORT_TYPE, hid.PHIDP_PREPARSED_DATA) uint32 { return fixture.maxData },
+	)
+	replaceNative(
+		t,
+		&winHidP_GetButtonCaps,
+		func(_ hid.HIDP_REPORT_TYPE, first *hid.HIDP_BUTTON_CAPS, count *uint16, _ hid.PHIDP_PREPARSED_DATA) foundation.NTSTATUS {
+			copy(unsafe.Slice(first, int(*count)), fixture.buttons)
+			*count = uint16(len(fixture.buttons))
+			return fixture.status
+		},
+	)
+	replaceNative(
+		t,
+		&winHidP_GetValueCaps,
+		func(_ hid.HIDP_REPORT_TYPE, first *hid.HIDP_VALUE_CAPS, count *uint16, _ hid.PHIDP_PREPARSED_DATA) foundation.NTSTATUS {
+			copy(unsafe.Slice(first, int(*count)), fixture.values)
+			*count = uint16(len(fixture.values))
+			return fixture.status
+		},
+	)
+	replaceNative(
+		t,
+		&winHidP_GetData,
+		func(_ hid.HIDP_REPORT_TYPE, first *hid.HIDP_DATA, count *uint32, _ hid.PHIDP_PREPARSED_DATA, _ foundation.PSTR, _ uint32) foundation.NTSTATUS {
+			copy(unsafe.Slice(first, int(*count)), fixture.data)
+			*count = uint32(len(fixture.data))
+			return fixture.status
+		},
+	)
 }
 
 func (fixture *nativeFixture) capture(t *testing.T, kind uint32) *capture {
 	t.Helper()
 	owner := makeBackend(&nativeState{tables: testKeyTables(t)}, nil)
-	device := &nativeDevice{kind: kind, handle: 1, tlc: topLevel{1, 2}, info: domain.DeviceInfo{ID: "device"}}
+	device := &nativeDevice{
+		kind:   kind,
+		handle: 1,
+		tlc:    topLevel{1, 2},
+		info:   domain.DeviceInfo{ID: "device"},
+	}
 	view := new(sinkview.Operations[domain.Event])
 	view.Operations.Publish = func(event *domain.Event) bool { fixture.events = append(fixture.events, *event); return true }
 	view.Operations.Fail = func(err error) { fixture.failures = append(fixture.failures, err) }
