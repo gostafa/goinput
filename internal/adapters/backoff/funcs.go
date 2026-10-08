@@ -11,7 +11,7 @@ import (
 )
 
 // Do retries transient failures until the context, budget, or attempt limit expires.
-func (retry retryFunc) Do(
+func (retry RetryFunc) Do(
 	ctx context.Context,
 	operation func(context.Context) error,
 	transient func(error) bool,
@@ -20,7 +20,7 @@ func (retry retryFunc) Do(
 }
 
 // New supplies the default bounded retry policy.
-func New() Retrier { return retryFunc(retry) }
+func New() RetryFunc { return RetryFunc(retry) }
 
 func retry(
 	ctx context.Context,
@@ -30,7 +30,7 @@ func retry(
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
-	var err error = resultError(engine.Retry(
+	err := resultError(engine.Retry(
 		ctx,
 		retryOperation(ctx, operation, transient),
 		engine.WithBackOff(
@@ -88,3 +88,6 @@ func retryError(ctx context.Context, err error) error {
 
 	return err
 }
+
+// resultError retains the error when an operation's value is irrelevant.
+func resultError[T any](_ T, err error) error { return errors.Join(err) }

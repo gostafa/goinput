@@ -12,17 +12,27 @@ import (
 	"github.com/gostafa/goinput/internal/adapters/singleton"
 	"github.com/gostafa/goinput/internal/application"
 	"github.com/gostafa/goinput/internal/domain"
-	"github.com/gostafa/goinput/internal/platform"
 	"github.com/gostafa/goinput/internal/ports"
 )
 
-const (
-	defaultBufferSize = 0
-)
-
 // NewProvider owns a lazy coordinator shared by explicitly related managers.
-func NewProvider() (ports.Provider[*application.Coordinator], error) {
-	factory, err := platform.Factory()
+func NewProvider(
+	selectFactory func() (ports.Factory, error),
+) (ports.Provider[*application.Coordinator], error) {
+	factory, err := selectFactory()
+
+	provider, err := providerFromFactory(factory, err)
+	if err != nil {
+		return nil, errors.Join(err)
+	}
+
+	return provider, nil
+}
+
+func providerFromFactory(
+	factory ports.Factory,
+	err error,
+) (ports.Provider[*application.Coordinator], error) {
 	if err != nil {
 		return nil, fmt.Errorf("create input system: %w", err)
 	}
@@ -36,6 +46,7 @@ func NewProvider() (ports.Provider[*application.Coordinator], error) {
 
 // New creates the input manager using the registered platform backend.
 func New(
+	ctx context.Context,
 	options domain.Options,
 	coordinator ports.Provider[*application.Coordinator],
 ) (*application.Manager, error) {
@@ -43,7 +54,7 @@ func New(
 		return nil, domain.ErrInvalidOptions
 	}
 
-	result0, callErr := application.NewManager(options, coordinator)
+	result0, callErr := application.NewManager(ctx, options, coordinator)
 	if callErr != nil {
 		return nil, errors.Join(callErr)
 	}

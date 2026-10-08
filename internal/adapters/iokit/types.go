@@ -1,9 +1,11 @@
+// Gostafa 2026.
+// SPDX-License-Identifier: Apache-2.0.
+
 //go:build darwin && (amd64 || arm64)
 
 package iokit
 
 import (
-	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,8 +13,174 @@ import (
 	extension "github.com/gostafa/goinput/extensions/iokit"
 	"github.com/gostafa/goinput/internal/domain"
 	"github.com/gostafa/goinput/internal/ports"
+	backendview "github.com/gostafa/goinput/internal/ports/backend"
+	captureview "github.com/gostafa/goinput/internal/ports/capture"
 	cf "github.com/tmc/apple/corefoundation"
 	native "github.com/tmc/apple/iokit"
+)
+
+type (
+	openFailure = openOutcome[*capture]
+
+	openOutcome[Value any] struct {
+		result    Value
+		err       error
+		recovered any
+	}
+	openTarget = openRequest[ports.EventSink, domain.DeviceID]
+
+	openRequest[Sink, ID any] struct {
+		sink Sink
+		id   ID
+	}
+	deviceSearch = endpointSearch[domain.DeviceID, native.IOHIDDeviceRef]
+
+	endpointSearch[ID, Device any] struct {
+		id      ID
+		devices []Device
+	}
+	captureSetup = subscriptionSetup[*deviceResources, ports.EventSink]
+
+	subscriptionSetup[Resources, Sink any] struct {
+		resources Resources
+		sink      Sink
+	}
+	deviceInventory struct {
+		devices []native.IOHIDDeviceRef
+		set     cf.CFSetRef
+	}
+	deviceReference struct{ ref native.IOHIDDeviceRef }
+)
+
+type (
+	nativeCoreAPI = struct {
+		runLoop      func() cf.CFRunLoopRef
+		stringRef    func(string) cf.CFStringRef
+		release      func(uintptr) error
+		setCount     func(cf.CFSetRef) int
+		setDevices   func(cf.CFSetRef, int) ([]native.IOHIDDeviceRef, error)
+		arrayCount   func(cf.CFArrayRef) int
+		arrayElement func(cf.CFArrayRef, int) native.IOHIDElementRef
+		openLibrary  func(string, int) (uintptr, error)
+		bind         func(uintptr, string, any) error
+		probeHID     func() (any, error)
+	}
+)
+
+type (
+	classCandidate = usageClass[domain.DeviceClass]
+
+	usageClass[Class any] struct {
+		class Class
+		usage uint32
+	}
+)
+
+type (
+	backendAwaitResponseArguments = struct {
+		backend *backend
+		request *request
+	}
+	backendCallArguments = struct {
+		backend *backend
+		perform func(*session) (any, error)
+	}
+	backendDiscardResponseArguments = struct {
+		backend *backend
+		request *request
+	}
+	backendOpenArguments = struct {
+		backend *backend
+		args    *openTarget
+	}
+	captureAddControlArguments = struct {
+		capture     *capture
+		multipliers map[multiplierKey]multiplierValue
+		element     native.IOHIDElementRef
+	}
+	captureProcessValueArguments = struct {
+		capture *capture
+		element native.IOHIDElementRef
+		value   native.IOHIDValueRef
+	}
+	capturePublishValueArguments = struct {
+		capture *capture
+		item    *elementControl
+		value   native.IOHIDValueRef
+	}
+	deviceRemovalCallbackArguments = struct {
+		token uintptr
+	}
+	finishCaptureOpenArguments = struct {
+		session   *session
+		resources *deviceResources
+		failure   *openFailure
+	}
+	inputValueCallbackArguments = struct {
+		token  uintptr
+		status int32
+		value  uintptr
+	}
+	sessionAbortOpenArguments = struct {
+		session   *session
+		resources *deviceResources
+		args      *openFailure
+	}
+	sessionDeviceInfosArguments = struct {
+		session *session
+		devices []native.IOHIDDeviceRef
+	}
+	sessionFindDeviceArguments = struct {
+		session *session
+		id      domain.DeviceID
+	}
+	sessionMatchDeviceArguments = struct {
+		session *session
+		args    *deviceSearch
+	}
+	sessionNewCaptureArguments = struct {
+		sink    ports.EventSink
+		session *session
+		ref     native.IOHIDDeviceRef
+	}
+	sessionNumberPropertyArguments = struct {
+		session *session
+		key     string
+		ref     native.IOHIDDeviceRef
+	}
+	sessionOpenArguments = struct {
+		session *session
+		args    *openTarget
+	}
+	sessionOpenDeviceArguments = struct {
+		session *session
+		args    captureSetup
+	}
+	sessionPrepareCaptureArguments = struct {
+		session   *session
+		resources *deviceResources
+		sink      ports.EventSink
+	}
+	sessionScheduleCaptureArguments = struct {
+		session   *session
+		resources *deviceResources
+		capture   *capture
+	}
+	sessionStringPropertyArguments = struct {
+		session *session
+		key     string
+		ref     native.IOHIDDeviceRef
+	}
+	sessionUsagePropertyArguments = struct {
+		session *session
+		key     string
+		ref     native.IOHIDDeviceRef
+	}
+)
+
+type (
+	backendOperations = backendview.Operations[domain.DeviceInfo, domain.DeviceID, ports.EventSink, ports.Capture]
+	captureOperations = captureview.Operations[domain.DeviceInfo, domain.Capabilities]
 )
 
 type (
@@ -34,7 +202,7 @@ type (
 	request = requestRecord[*session, response]
 
 	requestRecord[S, R any] struct {
-		ctx     context.Context
+		cause   func() error
 		perform func(S) (any, error)
 		result  chan R
 		pack    func(any, error) R
@@ -94,10 +262,7 @@ type (
 		multiplier float64
 	}
 
-	multiplierKey struct {
-		collection native.IOHIDElementRef
-		report     uint32
-	}
+	multiplierKey [nativeTwo]uint64
 
 	multiplierValue struct {
 		value float64
@@ -115,14 +280,6 @@ type (
 	// callback registration bridges pass opaque numeric contexts through uintptr.
 	// A private loader also handles the upstream lowercase IOKit framework path.
 	nativeAPI struct {
-		managerAPI
-		deviceAPI
-		elementIdentityAPI
-		elementValuesAPI
-		valueAPI
-		registryAPI
-	}
-	managerAPI struct {
 		// IOHIDManagerCreate is the native binding for that IOKit operation.
 		IOHIDManagerCreate func(cf.CFAllocatorRef, uint32) native.IOHIDManagerRef
 		// IOHIDManagerSetDeviceMatching is the native binding for that IOKit operation.
@@ -133,9 +290,7 @@ type (
 		IOHIDManagerScheduleWithRunLoop func(native.IOHIDManagerRef, cf.CFRunLoopRef, cf.CFStringRef)
 		// IOHIDManagerUnscheduleFromRunLoop is the native binding for that IOKit operation.
 		IOHIDManagerUnscheduleFromRunLoop func(native.IOHIDManagerRef, cf.CFRunLoopRef, cf.CFStringRef)
-	}
 
-	deviceAPI struct {
 		// IOHIDDeviceCreate is the native binding for that IOKit operation.
 		IOHIDDeviceCreate func(cf.CFAllocatorRef, uint32) native.IOHIDDeviceRef
 		// IOHIDDeviceGetService is the native binding for that IOKit operation.
@@ -166,9 +321,7 @@ type (
 		IOHIDDeviceScheduleWithRunLoop func(native.IOHIDDeviceRef, cf.CFRunLoopRef, cf.CFStringRef)
 		// IOHIDDeviceUnscheduleFromRunLoop is the native binding for that IOKit operation.
 		IOHIDDeviceUnscheduleFromRunLoop func(native.IOHIDDeviceRef, cf.CFRunLoopRef, cf.CFStringRef)
-	}
 
-	elementIdentityAPI struct {
 		// IOHIDElementGetCookie is the native binding for that IOKit operation.
 		IOHIDElementGetCookie func(native.IOHIDElementRef) uint32
 		// IOHIDElementGetType is the native binding for that IOKit operation.
@@ -189,9 +342,7 @@ type (
 		IOHIDElementGetLogicalMax func(native.IOHIDElementRef) cf.CFIndex
 		// IOHIDElementGetPhysicalMin is the native binding for that IOKit operation.
 		IOHIDElementGetPhysicalMin func(native.IOHIDElementRef) cf.CFIndex
-	}
 
-	elementValuesAPI struct {
 		// IOHIDElementGetPhysicalMax is the native binding for that IOKit operation.
 		IOHIDElementGetPhysicalMax func(native.IOHIDElementRef) cf.CFIndex
 		// IOHIDElementGetUnit is the native binding for that IOKit operation.
@@ -210,9 +361,7 @@ type (
 		IOHIDElementGetReportID func(native.IOHIDElementRef) uint32
 		// IOHIDElementGetDevice is the native binding for that IOKit operation.
 		IOHIDElementGetDevice func(native.IOHIDElementRef) native.IOHIDDeviceRef
-	}
 
-	valueAPI struct {
 		// IOHIDValueGetElement is the native binding for that IOKit operation.
 		IOHIDValueGetElement func(native.IOHIDValueRef) native.IOHIDElementRef
 		// IOHIDValueGetIntegerValue is the native binding for that IOKit operation.
@@ -221,9 +370,7 @@ type (
 		IOHIDValueGetLength func(native.IOHIDValueRef) cf.CFIndex
 		// IOHIDValueGetTimeStamp is the native binding for that IOKit operation.
 		IOHIDValueGetTimeStamp func(native.IOHIDValueRef) uint64
-	}
 
-	registryAPI struct {
 		// IORegistryEntryGetRegistryEntryID is the native binding for that IOKit operation.
 		IORegistryEntryGetRegistryEntryID func(uint32, *uint64) int32
 	}
@@ -240,4 +387,28 @@ type (
 		opened    bool
 		scheduled bool
 	}
+)
+
+type (
+	nativeState = nativeStateRecord[nativeAPI, machTimebase, nativeCoreAPI]
+
+	nativeStateRecord[API, Clock, Core any] struct {
+		api                  API
+		core                 Core
+		timebase             Clock
+		symbolErr            error
+		machAbsoluteTime     func() uint64
+		machTimebaseInfo     func(*Clock) int32
+		registryPath         func(uint32, string, *byte) int32
+		callbackRegistry     sync.Map
+		nativeLibraryHandles []uintptr
+		nextCallbackToken    atomic.Uint64
+		valueCallback        uintptr
+		removalCallback      uintptr
+		symbolOnce           sync.Once
+	}
+)
+
+type (
+	metadataView[T any] func() T
 )

@@ -8,7 +8,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
+	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"time"
@@ -16,33 +17,20 @@ import (
 	"github.com/gostafa/goinput"
 )
 
-type (
-	captureOptions struct {
-		args     []string
-		cycles   int
-		managers int
-		duration time.Duration
-	}
-)
-
-const (
-	exitFailure   = 1
-	unlimitedTime = 0
-
-	eventTimeFormat = "15:04:05.000000"
-	exitSuccess     = 0
-)
-
 func main() {
-	err := run()
+	reportResult(context.Background(), run(os.Args[exitFailure:]), os.Exit)
+}
+
+func reportResult(ctx context.Context, err error, exit func(int)) {
 	if err != nil && !errors.Is(err, flag.ErrHelp) {
-		log.Print(err)
-		os.Exit(exitFailure)
+		slog.New(slog.NewTextHandler(os.Stderr, nil)).
+			ErrorContext(ctx, "capture failed", slog.Any(errorAttribute, err))
+		exit(exitFailure)
 	}
 }
 
-func run() error {
-	options, err := parseOptions()
+func run(args []string) error {
+	options, err := parseOptions(args)
 	if err != nil {
 		return fmt.Errorf("run: %w", err)
 	}
@@ -51,35 +39,73 @@ func run() error {
 
 	defer stop()
 
-	return errors.Join(runCycles(ctx, &options))
+	return errors.Join(runCycles(ctx, &options, systemCreator(ctx)))
 }
 
-func parseOptions() (captureOptions, error) {
-	flags := flag.NewFlagSet("capture", flag.ContinueOnError)
-	cycles := flags.Int("cycles", exitFailure, "number of discovery/capture lifecycles")
-	managers := flags.Int("managers", exitFailure, "number of simultaneously open managers")
-	duration := flags.Duration(
-		"duration",
-		unlimitedTime,
-		"optional duration of each device capture",
-	)
+func systemCreator(ctx context.Context) func() (*goinput.System, error) {
+	return func() (*goinput.System, error) {
+		return goinput.NewSystem(ctx)
+	}
+}
 
-	err := flags.Parse(os.Args[exitFailure:])
+func parseOptions(args []string) (captureOptions, error) {
+	flags := newCaptureFlags()
+
+	err := flags.flags.Parse(args)
 	if err != nil {
 		return captureOptions{}, fmt.Errorf("parseOptions: %w", err)
 	}
 
-	options, err := parsedOptions(flags, *cycles, *managers, *duration)
+	options := optionsFromFlags(flags)
+
+	err = validateOptions(&options)
 
 	return options, errors.Join(err)
 }
 
-func (options *captureOptions) validate() error {
-	if options.cycles < exitFailure || options.managers < exitFailure {
+func newCaptureFlags() *captureFlags {
+	flags := flag.NewFlagSet("capture", flag.ContinueOnError)
+
+	return &captureFlags{
+		flags:    flags,
+		cycles:   flags.Int("cycles", exitFailure, "number of discovery/capture lifecycles"),
+		managers: flags.Int("managers", exitFailure, "number of simultaneously open managers"),
+		duration: flags.Duration(
+			"duration",
+			unlimitedTime,
+			"optional duration of each device capture",
+		),
+	}
+}
+
+func optionsFromFlags(flags *captureFlags) captureOptions {
+	return captureOptions{
+		cycles:   *flags.cycles,
+		managers: *flags.managers,
+		duration: *flags.duration,
+		args:     flags.flags.Args(),
+		output:   os.Stdout,
+		logger:   slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+}
+
+func validateOptions(options *captureOptions) error {
+	return errors.Join(
+		validateCounts(options.cycles, options.managers),
+		validateArguments(options.duration, options.args),
+	)
+}
+
+func validateCounts(cycles, managers int) error {
+	if cycles < exitFailure || managers < exitFailure {
 		return errors.Join(usageError())
 	}
 
-	if options.duration < unlimitedTime || len(options.args) > exitFailure {
+	return nil
+}
+
+func validateArguments(duration time.Duration, args []string) error {
+	if duration < unlimitedTime || len(args) > exitFailure {
 		return errors.Join(usageError())
 	}
 
@@ -87,23 +113,23 @@ func (options *captureOptions) validate() error {
 }
 
 func usageError() error {
-	return errors.New("usage: capture [-cycles n] [-managers n] [-duration 2s] [device-id]")
+	return errUsage
 }
 
-func runCycles(ctx context.Context, options *captureOptions) error {
-	system, err := goinput.NewSystem()
+func runCycles(
+	ctx context.Context,
+	options *captureOptions,
+	createSystem func() (*goinput.System, error),
+) error {
+	system, err := createSystem()
 	if err != nil {
 		return fmt.Errorf("create input system: %w", err)
 	}
 
 	for range options.cycles {
-		err := cycle(ctx, options, system)
+		err = cycle(ctx, options, system)
 		if err != nil {
 			return fmt.Errorf("runCycles: %w", err)
-		}
-
-		if ctx.Err() != nil {
-			break
 		}
 	}
 
@@ -111,54 +137,55 @@ func runCycles(ctx context.Context, options *captureOptions) error {
 }
 
 func cycle(ctx context.Context, options *captureOptions, system *goinput.System) error {
-	managers, err := extraManagers(ctx, options.managers, system)
-	defer closeManagers(managers)
+	managers, err := extraManagers(ctx, options, system)
+	defer closeManagers(ctx, options.logger, managers)
 
 	if err != nil {
-		return fmt.Errorf("cycle: %w", err)
+		return fmt.Errorf(cycleErrorFormat, err)
 	}
 
-	manager, err := goinput.New(goinput.Options{BufferSize: 0}, system)
+	manager, err := goinput.New(ctx, goinput.Options{BufferSize: 0}, system)
 	if err != nil {
-		return fmt.Errorf("cycle: %w", err)
+		return fmt.Errorf(cycleErrorFormat, err)
 	}
-	defer closeManager(manager)
+	defer closeManager(ctx, options.logger, manager)
 
-	return errors.Join(discoverAndCapture(ctx, manager, options))
+	return errors.Join(discoverAndCapture(ctx, manager, options), ctx.Err())
 }
 
 func extraManagers(
 	ctx context.Context,
-	count int,
+	options *captureOptions,
 	system *goinput.System,
 ) ([]*goinput.Manager, error) {
-	var managers []*goinput.Manager
+	managers := make(
+		[]*goinput.Manager,
+		unlimitedTime,
+		max(unlimitedTime, options.managers-exitFailure),
+	)
 
-	for index := exitFailure; index < count; index++ {
-		manager, err := goinput.New(goinput.Options{BufferSize: 0}, system)
+	for index := exitFailure; index < options.managers; index++ {
+		manager, err := openExtraManager(ctx, system, options)
 		if err != nil {
 			return managers, fmt.Errorf("extraManagers: %w", err)
 		}
 
 		managers = append(managers, manager)
-		if err := resultError(manager.Devices(ctx)); err != nil {
-			log.Printf("additional manager: %v", err)
-		}
 	}
 
 	return managers, nil
 }
 
-func closeManagers(managers []*goinput.Manager) {
+func closeManagers(ctx context.Context, logger *slog.Logger, managers []*goinput.Manager) {
 	for index := range managers {
-		closeManager(managers[index])
+		closeManager(ctx, logger, managers[index])
 	}
 }
 
-func closeManager(manager *goinput.Manager) {
+func closeManager(ctx context.Context, logger *slog.Logger, manager *goinput.Manager) {
 	err := manager.Close()
 	if err != nil {
-		log.Printf("close manager: %v", err)
+		logger.ErrorContext(ctx, "close manager", slog.Any(errorAttribute, err))
 	}
 }
 
@@ -169,10 +196,10 @@ func discoverAndCapture(
 ) error {
 	infos, diagnostic := manager.Devices(ctx)
 	if diagnostic != nil {
-		log.Printf("discovery: %v", diagnostic)
+		options.logger.ErrorContext(ctx, "discovery", slog.Any(errorAttribute, diagnostic))
 	}
 
-	err := printDevices(infos)
+	err := printDevices(options.output, infos)
 	if err != nil {
 		return fmt.Errorf("discoverAndCapture: %w", err)
 	}
@@ -184,10 +211,10 @@ func discoverAndCapture(
 	return errors.Join(captureDevice(ctx, manager, options))
 }
 
-func printDevices(infos []goinput.DeviceInfo) error {
+func printDevices(output io.Writer, infos []goinput.DeviceInfo) error {
 	for index := range infos {
 		err := resultError(
-			fmt.Printf("%s\t%s\n", infos[index].ID, infos[index].Name),
+			fmt.Fprintf(output, "%s\t%s\n", infos[index].ID, infos[index].Name),
 		)
 		if err != nil {
 			return errors.Join(err)
@@ -202,34 +229,29 @@ func captureDevice(ctx context.Context, manager *goinput.Manager, options *captu
 	if err != nil {
 		return fmt.Errorf("captureDevice: %w", err)
 	}
-	defer closeDevice(device)
+	defer closeDevice(ctx, options.logger, device)
 
-	readctx, cancel := captureContext(ctx, options.duration)
+	readctx, cancel := context.WithCancel(ctx)
+
+	if options.duration > unlimitedTime {
+		cancel()
+
+		readctx, cancel = context.WithTimeout(ctx, options.duration)
+	}
 
 	defer cancel()
 
-	return errors.Join(readEvents(readctx, device))
+	return errors.Join(readEvents(readctx, device, options.output))
 }
 
-func closeDevice(device goinput.Device) {
+func closeDevice(ctx context.Context, logger *slog.Logger, device goinput.Device) {
 	err := device.Close()
 	if err != nil {
-		log.Printf("close device: %v", err)
+		logger.ErrorContext(ctx, "close device", slog.Any(errorAttribute, err))
 	}
 }
 
-func captureContext(
-	ctx context.Context,
-	duration time.Duration,
-) (context.Context, context.CancelFunc) {
-	if duration > unlimitedTime {
-		return context.WithTimeout(ctx, duration)
-	}
-
-	return ctx, func() {}
-}
-
-func readEvents(ctx context.Context, device goinput.Device) error {
+func readEvents(ctx context.Context, device goinput.Device, output io.Writer) error {
 	controls := deviceControls(device)
 
 	for {
@@ -238,7 +260,8 @@ func readEvents(ctx context.Context, device goinput.Device) error {
 			return errors.Join(readError(err))
 		}
 
-		if err := printEvent(&event, controls[event.ControlID]); err != nil {
+		err = printEvent(output, &event, controls[event.ControlID])
+		if err != nil {
 			return errors.Join(err)
 		}
 	}
@@ -247,8 +270,10 @@ func readEvents(ctx context.Context, device goinput.Device) error {
 func deviceControls(device goinput.Device) map[goinput.ControlID]*goinput.Control {
 	controls := make(map[goinput.ControlID]*goinput.Control)
 
-	for index := range device.Capabilities().Controls {
-		controls[device.Capabilities().Controls[index].ID] = &device.Capabilities().Controls[index]
+	snapshot := device.Capabilities()
+
+	for index := range snapshot.Controls {
+		controls[snapshot.Controls[index].ID] = &snapshot.Controls[index]
 	}
 
 	return controls
@@ -262,19 +287,19 @@ func readError(err error) error {
 	return err
 }
 
-func printEvent(event *goinput.Event, control *goinput.Control) error {
-	var err error
-
-	err = resultError(fmt.Printf("%s\t%s\tusage=%s action=%d value=%g unit=%d time=%s\n",
-		event.DeviceID, event.ControlID, controlUsage(control), event.Action, event.Value,
-		controlUnit(control), event.Timestamp.Time.Format(eventTimeFormat)))
+func printEvent(output io.Writer, event *goinput.Event, control *goinput.Control) error {
+	err := resultError(
+		fmt.Fprintf(output, "%s\t%s\tusage=%s action=%d value=%g unit=%d time=%s\n",
+			event.DeviceID, event.ControlID, controlUsage(control), event.Action, event.Value,
+			controlUnit(control), event.Timestamp.Time.Format(eventTimeFormat)),
+	)
 
 	return errors.Join(err)
 }
 
 func controlUsage(control *goinput.Control) goinput.Usage {
 	if control == nil {
-		return exitSuccess
+		return goinput.UsageUnknown
 	}
 
 	return control.Usage
@@ -282,23 +307,29 @@ func controlUsage(control *goinput.Control) goinput.Usage {
 
 func controlUnit(control *goinput.Control) goinput.Unit {
 	if control == nil {
-		return exitSuccess
+		return goinput.UnitUnknown
 	}
 
 	return control.Unit
 }
 
-func parsedOptions(
-	flags *flag.FlagSet,
-	cycles, managers int,
-	duration time.Duration,
-) (captureOptions, error) {
-	options := captureOptions{
-		cycles:   cycles,
-		managers: managers,
-		duration: duration,
-		args:     flags.Args(),
+func openExtraManager(
+	ctx context.Context,
+	system *goinput.System,
+	options *captureOptions,
+) (*goinput.Manager, error) {
+	manager, err := goinput.New(ctx, goinput.Options{BufferSize: unlimitedTime}, system)
+	if err != nil {
+		return nil, errors.Join(err)
 	}
 
-	return options, errors.Join(options.validate())
+	err = resultError(manager.Devices(ctx))
+	if err != nil {
+		options.logger.ErrorContext(ctx, "additional manager", slog.Any(errorAttribute, err))
+	}
+
+	return manager, nil
 }
+
+// resultError retains the error when an operation's value is irrelevant.
+func resultError[T any](_ T, err error) error { return errors.Join(err) }

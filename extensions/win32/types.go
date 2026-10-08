@@ -8,6 +8,20 @@ import (
 )
 
 type (
+	// DescriptorBounds groups logical and physical bounds of one report value.
+	DescriptorBounds struct {
+		// LogicalMin is the inclusive logical lower bound.
+		LogicalMin int32
+		// LogicalMax is the inclusive logical upper bound.
+		LogicalMax int32
+		// PhysicalMin is the descriptor's physical lower bound.
+		PhysicalMin int32
+		// PhysicalMax is the descriptor's physical upper bound.
+		PhysicalMax int32
+	}
+)
+
+type (
 	// Metadata is the optional Windows device metadata interface.
 	Metadata interface {
 		domain.MetadataProvider[Info]
@@ -37,31 +51,35 @@ type (
 	// ID matches the corresponding normalized control. Keyboard ScanCode combines
 	// the make code with its E0/E1 prefix; VirtualKey identifies keyboard inputs with
 	// no scan code. Generic HID controls use data indices.
-	NativeControl struct {
-		ID string
-		DescriptorBounds
-		Units          uint32
-		UnitsExponent  uint32
-		ReportCount    uint16
-		BitSize        uint16
-		VirtualKey     uint16
-		LinkCollection uint16
-		DataIndex      uint16
-		ScanCode       uint16
-		ReportID       byte
-		HasNull        bool
-		Absolute       bool
-	}
+	NativeControl = NativeControlRecord[DescriptorBounds]
 
-	// DescriptorBounds groups logical and physical bounds of one report value.
-	DescriptorBounds struct {
-		// LogicalMin is the inclusive logical lower bound.
-		LogicalMin int32
-		// LogicalMax is the inclusive logical upper bound.
-		LogicalMax int32
-		// PhysicalMin is the descriptor's physical lower bound.
-		PhysicalMin int32
-		// PhysicalMax is the descriptor's physical upper bound.
-		PhysicalMax int32
+	// NativeControlRecord preserves native fields with caller-defined bounds.
+	NativeControlRecord[Bounds any] struct {
+		// Bounds preserves the logical and physical report limits.
+		Bounds Bounds
+		// ID identifies the corresponding device-local control.
+		ID string
+		// Units contains the HID physical unit descriptor.
+		Units uint32
+		// UnitsExponent contains the signed HID unit exponent encoding.
+		UnitsExponent uint32
+		// VirtualKey identifies keyboard inputs without a scan code.
+		VirtualKey uint16
+		// BitSize is the report value width in bits.
+		BitSize uint16
+		// ReportCount is the number of values in the report item.
+		ReportCount uint16
+		// LinkCollection identifies the parent HID link collection.
+		LinkCollection uint16
+		// DataIndex identifies the control within its input report.
+		DataIndex uint16
+		// ScanCode combines the keyboard make code with its E0 or E1 prefix.
+		ScanCode uint16
+		// ReportID identifies the containing HID report.
+		ReportID byte
+		// HasNull reports whether the descriptor defines a null state.
+		HasNull bool
+		// Absolute distinguishes absolute values from relative deltas.
+		Absolute bool
 	}
 )

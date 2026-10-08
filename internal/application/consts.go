@@ -8,17 +8,14 @@ import (
 )
 
 const (
-	nilContextMessage              = "goinput: nil context"
-	discoveryBudget                = ports.DiscoveryBudget
-	sessionIdle       sessionState = 16
-
-	sessionStarting sessionState = 17
-	sessionRunning  sessionState = 18
-
-	sessionStopping sessionState = 19
-	unitStep        sessionState = 1
-
-	emptyQueueSize   = 0
-	operationOpen    = "open"
-	operationDevices = "devices"
+	leaseErrorFormat              = "getLease: %w"
+	discoveryBudget               = ports.DiscoveryBudget
+	unitStep                      = 1
+	emptyQueueSize                = 0
+	operationOpen                 = "open"
+	operationDevices              = "devices"
+	sessionIdle      sessionState = 16
+	sessionStarting  sessionState = 17
+	sessionRunning   sessionState = 18
+	sessionStopping  sessionState = 19
 )

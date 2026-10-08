@@ -1,3 +1,6 @@
+// Gostafa 2026.
+// SPDX-License-Identifier: Apache-2.0.
+
 //go:build linux && (amd64 || arm64)
 
 package evdev

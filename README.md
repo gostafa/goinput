@@ -55,8 +55,8 @@ flowchart TD
     I --> J[Close manager]
 ```
 
-1. Create a reusable system with `system, err := goinput.NewSystem()`, then create
-   managers with `goinput.New(goinput.Options{}, system)`. The default buffer is
+1. Create a reusable system with `system, err := goinput.NewSystem(ctx)`, then create
+   managers with `goinput.New(ctx, goinput.Options{}, system)`. The default buffer is
    256 events per device; a negative `BufferSize` is invalid. Construction starts
    no native resources. Construct managers through `New`; do not copy them or use
    their zero value.

@@ -13,33 +13,29 @@ import (
 	"github.com/gostafa/goinput/internal/application"
 	"github.com/gostafa/goinput/internal/domain"
 	"github.com/gostafa/goinput/internal/implementation"
-)
-
-const (
-	normalizedMinimum = 0
-	errorPairSize     = 2
-	publicErrorIndex  = 1
+	"github.com/gostafa/goinput/internal/platform"
+	"github.com/gostafa/goinput/internal/ports"
 )
 
 // HID constructs a usage from its standard page and ID.
-func HID(page, id uint16) Usage { return Usage(uint32(page)<<16 | uint32(id)) }
+func HID(page, id uint16) Usage { return Usage(domain.HID(page, id)) }
 
 // Page returns the HID usage page.
-func (u Usage) Page() uint16 { return uint16(uint32(u) >> 16) }
+func (u Usage) Page() uint16 { return domain.Usage(u).Page() }
 
 // ID returns the usage ID within its HID page.
-func (u Usage) ID() uint16 { return uint16(u) }
+func (u Usage) ID() uint16 { return domain.Usage(u).ID() }
 
 func (u Usage) String() string { return fmt.Sprintf("%04x:%04x", u.Page(), u.ID()) }
 
 // New creates a manager without opening devices or starting native resources.
 // BufferSize zero selects 256 events per device.
-func New(options Options, system *System) (*Manager, error) {
-	if system == nil || system.provider == nil {
+func New(ctx context.Context, options Options, system *System) (*Manager, error) {
+	if ctx == nil || system == nil || system.provider == nil {
 		return nil, ErrInvalidOptions
 	}
 
-	impl, err := implementation.New(options, system.provider)
+	impl, err := implementation.New(ctx, options, system.provider)
 	if err != nil {
 		return nil, errors.Join(publicError(err))
 	}
@@ -54,11 +50,11 @@ func managerDevices(ctx context.Context, impl managerImpl) ([]DeviceInfo, error)
 	var result []DeviceInfo
 
 	if infos != nil {
-		result = make([]DeviceInfo, len(infos))
+		result = slices.Grow([]DeviceInfo{}, len(infos))
 	}
 
 	for i := range infos {
-		result[i] = publicInfo(&infos[i])
+		result = append(result, publicInfo(&infos[i]))
 	}
 
 	return result, errors.Join(publicError(err))
@@ -129,11 +125,11 @@ func publicCapabilities(capabilities *domain.Capabilities) Capabilities {
 		Repeat:   Support(capabilities.Repeat),
 	}
 	if capabilities.Controls != nil {
-		result.Controls = make([]Control, len(capabilities.Controls))
+		result.Controls = slices.Grow([]Control{}, len(capabilities.Controls))
 	}
 
 	for i := range capabilities.Controls {
-		result.Controls[i] = publicControl(&capabilities.Controls[i])
+		result.Controls = append(result.Controls, publicControl(&capabilities.Controls[i]))
 	}
 
 	return result
@@ -173,7 +169,8 @@ func publicError(err error) error {
 		return errors.Join(translated)
 	}
 
-	if operation, ok := errors.AsType[*domain.OpError](err); ok {
+	operation, ok := errors.AsType[*domain.OpError](err)
+	if ok && sameError(err, operation) {
 		return &OpError{
 			Op:       operation.Op,
 			DeviceID: DeviceID(operation.DeviceID),
@@ -189,7 +186,7 @@ func sameError(a, b error) bool {
 		return a == nil && b == nil
 	}
 
-	return reflect.TypeOf(a).Comparable() && errors.Is(a, b)
+	return reflect.TypeOf(a).Comparable() && reflect.ValueOf(a).Equal(reflect.ValueOf(b))
 }
 
 func clonePointer[T any](value *T) *T {
@@ -207,16 +204,16 @@ func publicClasses(classes []domain.DeviceClass) []DeviceClass {
 		return nil
 	}
 
-	result := make([]DeviceClass, len(classes))
+	result := slices.Grow([]DeviceClass{}, len(classes))
 	for index := range classes {
-		result[index] = DeviceClass(classes[index])
+		result = append(result, DeviceClass(classes[index]))
 	}
 
 	return result
 }
 
 func publicSentinel(err error) error {
-	pairs := [][errorPairSize]error{
+	pairs := []struct{ internal, public error }{
 		{domain.ErrUnsupported, ErrUnsupported},
 		{domain.ErrPermissionDenied, ErrPermissionDenied},
 		{domain.ErrNotFound, ErrNotFound},
@@ -227,8 +224,8 @@ func publicSentinel(err error) error {
 		{domain.ErrInvalidOptions, ErrInvalidOptions},
 	}
 	for index := range pairs {
-		if errors.Is(err, pairs[index][0]) {
-			return pairs[index][publicErrorIndex]
+		if sameError(err, pairs[index].internal) {
+			return pairs[index].public
 		}
 	}
 
@@ -253,11 +250,11 @@ func errorChildren(err error) []error {
 
 func publicWrappedError(err error) error {
 	children := errorChildren(err)
-	converted := make([]error, len(children))
+	converted := slices.Grow([]error{}, len(children))
 	changed := false
 
 	for index := range children {
-		converted[index] = publicError(children[index])
+		converted = append(converted, publicError(children[index]))
 		changed = changed || !sameError(converted[index], children[index])
 	}
 
@@ -291,4 +288,72 @@ func publicControl(control *domain.Control) Control {
 	}
 
 	return result
+}
+
+// NewSystem creates a reusable input system without opening native resources.
+// The context bounds creation; it does not control subsequent manager lifetimes.
+func NewSystem(ctx context.Context) (*System, error) {
+	if ctx == nil {
+		return nil, ErrInvalidOptions
+	}
+
+	provider, err := implementation.NewProvider(platform.Factory)
+
+	err = errors.Join(err, context.Cause(ctx))
+
+	system, err := systemFromProvider(provider, err)
+	if err != nil {
+		return nil, errors.Join(err)
+	}
+
+	return system, nil
+}
+
+func systemFromProvider(
+	provider ports.Provider[*application.Coordinator],
+	err error,
+) (*System, error) {
+	if err != nil {
+		return nil, errors.Join(publicError(err))
+	}
+
+	return &System{provider: provider}, nil
+}
+
+func newManagerView(impl managerImpl) *Manager {
+	view := new(Manager)
+
+	view.Operations.Devices = func(ctx context.Context) ([]DeviceInfo, error) { return managerDevices(ctx, impl) }
+	configureManagerOpen(view, impl)
+
+	view.Operations.Close = func() error { return managerClose(impl) }
+
+	return view
+}
+
+func newDeviceView(impl application.Device) *device {
+	view := new(device)
+
+	view.Operations.Info = func() DeviceInfo { return deviceInfo(impl) }
+	view.Operations.Capabilities = func() Capabilities { return deviceCapabilities(impl) }
+	view.Operations.Read = func(ctx context.Context) (Event, error) { return deviceRead(ctx, impl) }
+	configureDeviceClose(view, impl)
+
+	return view
+}
+
+func configureDeviceClose(view *device, impl application.Device) {
+	view.Operations.Extension = func(target any) bool { return deviceExtension(impl, target) }
+	view.Operations.Close = func() error { return deviceClose(impl) }
+}
+
+func configureManagerOpen(view *Manager, impl managerImpl) {
+	view.Operations.Open = func(ctx context.Context, id DeviceID) (Device, error) {
+		opened, err := managerOpen(ctx, impl, id)
+		if err != nil {
+			return nil, errors.Join(err)
+		}
+
+		return opened, nil
+	}
 }

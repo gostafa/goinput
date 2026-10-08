@@ -6,43 +6,63 @@ package domain
 import (
 	"fmt"
 	"math"
+	"math/bits"
 	"slices"
 )
 
-const (
-	hatMaximumOrdinal     = 7
-	hatRangeInclusiveStep = 1
-	normalizedMinimum     = 0
-)
+// Copy copies the control schema, including each control's mutable fields.
+func (caps *CapabilitiesRecord[C, Supported]) Copy() CapabilitiesRecord[C, Supported] {
+	return CapabilitiesRecord[C, Supported]{
+		Controls: cloneValues(caps.Controls), Complete: caps.Complete, Repeat: caps.Repeat,
+	}
+}
+
+// Clone copies a control, including its optional mutable logical range.
+func (c ControlRecord[R, ID, U, Kind, Mapping, Mode, ValueUnit, Supported]) Clone() ControlRecord[
+	R, ID, U, Kind, Mapping, Mode, ValueUnit, Supported,
+] {
+	return ControlRecord[R, ID, U, Kind, Mapping, Mode, ValueUnit, Supported]{
+		Range: clonePointer(c.Range), ID: c.ID, Name: c.Name, Usage: c.Usage,
+		Kind: c.Kind, Mapping: c.Mapping, Mode: c.Mode, Unit: c.Unit, Support: c.Support,
+	}
+}
 
 // HID constructs a usage from its standard page and ID.
-func HID(page, id uint16) Usage { return Usage(uint32(page)<<16 | uint32(id)) }
+func HID(
+	page, id uint16,
+) Usage {
+	return Usage(uint32(page)<<bits.Len16(math.MaxUint16) | uint32(id))
+}
 
 // Page returns the HID usage page.
-func (u Usage) Page() uint16 { return uint16(uint32(u) >> 16) }
+func (u Usage) Page() uint16 {
+	return uint16((uint32(u) >> bits.Len16(math.MaxUint16)) & math.MaxUint16)
+}
 
 // ID returns the usage ID within its HID page.
-func (u Usage) ID() uint16 { return uint16(u) }
+func (u Usage) ID() uint16 { return uint16(uint32(u) & math.MaxUint16) }
 
 func (u Usage) String() string { return fmt.Sprintf("%04x:%04x", u.Page(), u.ID()) }
 
 // Normalize explicitly scales a logical absolute axis into [0,1]. It does not
 // infer a centered axis, deadzone, or physical unit. Invalid/null values, relative
 // axes, hats, and unknown or degenerate ranges return false.
-func (c *ControlRecord[R, ID, U, Kind, Mapping, Mode, ValueUnit, Supported]) Normalize(
+func (control *ControlRecord[R, ID, U, Kind, Mapping, Mode, ValueUnit, Supported]) Normalize(
 	value float64,
 ) (float64, bool) {
-	if c.Kind != Kind(ControlAxis) || c.Mode != Mode(AxisAbsolute) {
+	if control.Kind != Kind(ControlAxis) || control.Mode != Mode(AxisAbsolute) {
 		return normalizedMinimum, false
 	}
 
-	return normalizeRecord(c.Range, value)
+	return normalizeRecord(control.Range, value)
 }
 
 // Hat decodes conventional four/eight-position HID hats with north at logical
 // minimum. Unsupported encodings remain logical controls in their backend.
 func Hat(value int64, logical Range, hasNull bool) (HatDirection, bool) {
-	count := logical.Max - logical.Min + hatRangeInclusiveStep
+	count := logical.Max - logical.Min
+	count++
+
 	if !validHatRange(logical) || !validHatCount(count) {
 		return HatNeutral, false
 	}
@@ -51,7 +71,12 @@ func Hat(value int64, logical Range, hasNull bool) (HatDirection, bool) {
 		return HatNeutral, hasNull
 	}
 
-	return HatNorth + HatDirection((value-logical.Min)*(hatEightPositions/count)), true
+	directions := [...]HatDirection{
+		HatNorth, HatNorthEast, HatEast, HatSouthEast,
+		HatSouth, HatSouthWest, HatWest, HatNorthWest,
+	}
+
+	return directions[(value-logical.Min)*(hatEightPositions/count)], true
 }
 
 // CloneInfo copies endpoint metadata and all mutable fields.
@@ -116,13 +141,13 @@ func normalizeRecord[R ~struct{ Min, Max int64 }](
 	}
 
 	minimum, maximum := Range(*logical).Bounds()
-	lo, hi := float64(minimum), float64(maximum)
+	low, high := float64(minimum), float64(maximum)
 
-	if !inFloatRange(value, lo, hi) {
+	if !inFloatRange(value, low, high) {
 		return normalizedMinimum, false
 	}
 
-	return (value - lo) / (hi - lo), true
+	return (value - low) / (high - low), true
 }
 
 func clonePointer[T any](value *T) *T {
@@ -136,11 +161,13 @@ func clonePointer[T any](value *T) *T {
 }
 
 func finiteValue(value float64) bool {
-	return !math.IsNaN(value) && !math.IsInf(value, normalizedMinimum)
+	return !math.IsNaN(value) && !math.IsInf(value, int(normalizedMinimum))
 }
 
 func validHatRange(logical Range) bool {
-	return logical.Max >= logical.Min && logical.Max-logical.Min <= hatMaximumOrdinal
+	span := logical.Max - logical.Min
+
+	return logical.Max >= logical.Min && span >= int64(UsageUnknown) && span < hatEightPositions
 }
 
 func validHatCount(count int64) bool {

@@ -8,7 +8,6 @@ import (
 
 	"github.com/gostafa/goinput/internal/application"
 	"github.com/gostafa/goinput/internal/domain"
-	"github.com/gostafa/goinput/internal/ports"
 )
 
 var (
@@ -30,7 +29,7 @@ var (
 	ErrInvalidOptions                   = errors.New("goinput: invalid options")
 	_                 Device            = (*device)(nil)
 	_                 ExtensionProvider = (*device)(nil)
-	_                 managerImpl       = (*ports.ManagerOperations[
+	_                 managerImpl       = (*managerOperations[
 		domain.DeviceInfo, domain.DeviceID, application.Device,
 	])(
 		nil,

@@ -21,13 +21,20 @@ func (info InfoRecord[C]) Clone() InfoRecord[C] {
 }
 
 // Clone returns an independent native control descriptor.
-func (control NativeControl) Clone() NativeControl {
-	return NativeControl{
-		DescriptorBounds: control.DescriptorBounds,
-		ID:               control.ID, Units: control.Units, UnitsExponent: control.UnitsExponent,
-		VirtualKey: control.VirtualKey, BitSize: control.BitSize,
-		ReportCount: control.ReportCount, LinkCollection: control.LinkCollection,
-		DataIndex: control.DataIndex, ScanCode: control.ScanCode, ReportID: control.ReportID,
-		HasNull: control.HasNull, Absolute: control.Absolute,
+func (control *NativeControlRecord[Bounds]) Clone() NativeControlRecord[Bounds] {
+	return NativeControlRecord[Bounds]{
+		Bounds:         control.Bounds,
+		ID:             control.ID,
+		Units:          control.Units,
+		UnitsExponent:  control.UnitsExponent,
+		VirtualKey:     control.VirtualKey,
+		BitSize:        control.BitSize,
+		ReportCount:    control.ReportCount,
+		LinkCollection: control.LinkCollection,
+		DataIndex:      control.DataIndex,
+		ScanCode:       control.ScanCode,
+		ReportID:       control.ReportID,
+		HasNull:        control.HasNull,
+		Absolute:       control.Absolute,
 	}
 }

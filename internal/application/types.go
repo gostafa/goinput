@@ -9,6 +9,15 @@ import (
 
 	"github.com/gostafa/goinput/internal/domain"
 	"github.com/gostafa/goinput/internal/ports"
+	deviceview "github.com/gostafa/goinput/internal/ports/device"
+	managerview "github.com/gostafa/goinput/internal/ports/manager"
+	sinkview "github.com/gostafa/goinput/internal/ports/sink"
+)
+
+type (
+	deviceOperations[I, C, E any]   = deviceview.Operations[I, C, E]
+	managerOperations[I, ID, D any] = managerview.Operations[I, ID, D]
+	sinkOperations[E any]           = sinkview.Operations[E]
 )
 
 type (
@@ -32,7 +41,7 @@ type (
 	managerRecord[P, L any, D comparable, O any] struct {
 		options   O
 		closeErr  error
-		ctx       context.Context
+		onClose   func(context.CancelCauseFunc) func() bool
 		lease     L
 		provider  P
 		devices   map[D]struct{}
@@ -99,8 +108,10 @@ type (
 		mu        sync.Mutex
 	}
 	// acquisition distinguishes a ready lease from a pending session transition.
-	acquisition struct {
-		lease   *lease
+	acquisition = acquisitionRecord[*lease]
+
+	acquisitionRecord[Lease any] struct {
+		lease   Lease
 		changed <-chan struct{}
 	}
 )

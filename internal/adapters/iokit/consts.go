@@ -1,3 +1,6 @@
+// Gostafa 2026.
+// SPDX-License-Identifier: Apache-2.0.
+
 //go:build darwin && (amd64 || arm64)
 
 package iokit
@@ -36,4 +39,15 @@ const (
 	unitExponentModulus = 16
 
 	operationRead = "read"
+)
+
+const (
+	coreFoundationLibrary = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+)
+
+const (
+	openErrorFormat    = "open: %w"
+	statusErrorFormat  = "%w: IOReturn 0x%08x"
+	callErrorFormat    = "call: %w"
+	symbolsErrorFormat = "initializeSymbols: %w"
 )

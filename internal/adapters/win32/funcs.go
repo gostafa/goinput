@@ -1,3 +1,6 @@
+// Gostafa 2026.
+// SPDX-License-Identifier: Apache-2.0.
+
 //go:build windows && (amd64 || arm64)
 
 package win32
@@ -820,7 +823,10 @@ func (c *capture) keyboardCapabilities() {
 			Unit:    domain.UnitBoolean,
 			Support: domain.SupportUnknown,
 		}
-		control := ext.NativeControl{ID: string(id), ScanCode: scan}
+		control := ext.NativeControl{
+			ID:       string(id),
+			ScanCode: scan,
+		}
 		if scan&0xff00 == 0xff00 {
 			control.ScanCode, control.VirtualKey = 0, scan&0xff
 		}
@@ -1051,14 +1057,14 @@ func (c *capture) hidCapabilities(ctx context.Context) error {
 							Support: support,
 						},
 						native: ext.NativeControl{
-							ID:               string(id),
-							ReportID:         button.ReportID,
-							DataIndex:        uint16(dataIndex),
-							LinkCollection:   button.LinkCollection,
-							ReportCount:      button.ReportCount,
-							BitSize:          1,
-							DescriptorBounds: ext.DescriptorBounds{LogicalMin: 0, LogicalMax: 1},
-							Absolute:         button.IsAbsolute != 0,
+							ID:             string(id),
+							ReportID:       button.ReportID,
+							DataIndex:      uint16(dataIndex),
+							LinkCollection: button.LinkCollection,
+							ReportCount:    button.ReportCount,
+							BitSize:        1,
+							Bounds:         ext.DescriptorBounds{LogicalMin: 0, LogicalMax: 1},
+							Absolute:       button.IsAbsolute != 0,
 						},
 					})
 				}
@@ -1135,7 +1141,7 @@ func (c *capture) hidCapabilities(ctx context.Context) error {
 						LinkCollection: value.LinkCollection,
 						BitSize:        value.BitSize,
 						ReportCount:    value.ReportCount,
-						DescriptorBounds: ext.DescriptorBounds{
+						Bounds: ext.DescriptorBounds{
 							LogicalMin: value.LogicalMin, LogicalMax: value.LogicalMax,
 							PhysicalMin: value.PhysicalMin, PhysicalMax: value.PhysicalMax,
 						},
@@ -1486,10 +1492,14 @@ func (c *capture) report(report []byte, stamp domain.Timestamp) {
 			}
 			continue
 		}
-		value := logicalValue(word, ctrl.native.BitSize, ctrl.native.LogicalMin < 0)
-		minValue, maxValue := int64(ctrl.native.LogicalMin), int64(ctrl.native.LogicalMax)
-		if ctrl.native.LogicalMin >= 0 && ctrl.native.LogicalMax < 0 {
-			maxValue = int64(uint32(ctrl.native.LogicalMax))
+		value := logicalValue(word, ctrl.native.BitSize, ctrl.native.Bounds.LogicalMin < 0)
+		minValue, maxValue := int64(
+			ctrl.native.Bounds.LogicalMin,
+		), int64(
+			ctrl.native.Bounds.LogicalMax,
+		)
+		if ctrl.native.Bounds.LogicalMin >= 0 && ctrl.native.Bounds.LogicalMax < 0 {
+			maxValue = int64(uint32(ctrl.native.Bounds.LogicalMax))
 		}
 		if ctrl.hat {
 			direction, ok := domain.Hat(
@@ -1545,3 +1555,5 @@ func logicalValue(word uint32, bits uint16, signed bool) int64 {
 
 // Factory returns the native backend constructor.
 func Factory() ports.Factory { return newBackend }
+
+func resultError[Value any](_ Value, err error) error { return errors.Join(err) }

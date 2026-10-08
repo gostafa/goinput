@@ -207,281 +207,281 @@ const (
 	// Button1 is the button1 value.
 	// Button ordinals do not promise physical positions on a game controller.
 	// Button usages identify device-local button ordinals.
-	Button1 Usage = 0x00090001 + (iota - 77)
+	Button1 Usage = 0x00090001
 	// Button2 identifies button2.
-	Button2
+	Button2 Usage = 0x00090002
 	// Button3 identifies button3.
-	Button3
+	Button3 Usage = 0x00090003
 	// Button4 identifies button4.
-	Button4
+	Button4 Usage = 0x00090004
 	// Button5 identifies button5.
-	Button5
+	Button5 Usage = 0x00090005
 	// Button6 identifies button6.
-	Button6
+	Button6 Usage = 0x00090006
 	// Button7 identifies button7.
-	Button7
+	Button7 Usage = 0x00090007
 	// Button8 identifies button8.
-	Button8
+	Button8 Usage = 0x00090008
 	// Button9 identifies button9.
-	Button9
+	Button9 Usage = 0x00090009
 	// Button10 identifies button10.
-	Button10
+	Button10 Usage = 0x0009000a
 	// Button11 identifies button11.
-	Button11
+	Button11 Usage = 0x0009000b
 	// Button12 identifies button12.
-	Button12
+	Button12 Usage = 0x0009000c
 	// Button13 identifies button13.
-	Button13
+	Button13 Usage = 0x0009000d
 	// Button14 identifies button14.
-	Button14
+	Button14 Usage = 0x0009000e
 	// Button15 identifies button15.
-	Button15
+	Button15 Usage = 0x0009000f
 	// Button16 identifies button16.
-	Button16
+	Button16 Usage = 0x00090010
 
 	// KeyA is the key a value.
 	// Key usages identify HID keyboard controls.
-	KeyA Usage = 0x00070004 + (iota - 93)
+	KeyA Usage = 0x00070004
 	// KeyB identifies key b.
-	KeyB
+	KeyB Usage = 0x00070005
 	// KeyC identifies key c.
-	KeyC
+	KeyC Usage = 0x00070006
 	// KeyD identifies key d.
-	KeyD
+	KeyD Usage = 0x00070007
 	// KeyE identifies key e.
-	KeyE
+	KeyE Usage = 0x00070008
 	// KeyF identifies key f.
-	KeyF
+	KeyF Usage = 0x00070009
 	// KeyG identifies key g.
-	KeyG
+	KeyG Usage = 0x0007000a
 	// KeyH identifies key h.
-	KeyH
+	KeyH Usage = 0x0007000b
 	// KeyI identifies key i.
-	KeyI
+	KeyI Usage = 0x0007000c
 	// KeyJ identifies key j.
-	KeyJ
+	KeyJ Usage = 0x0007000d
 	// KeyK identifies key k.
-	KeyK
+	KeyK Usage = 0x0007000e
 	// KeyL identifies key l.
-	KeyL
+	KeyL Usage = 0x0007000f
 	// KeyM identifies key m.
-	KeyM
+	KeyM Usage = 0x00070010
 	// KeyN identifies key n.
-	KeyN
+	KeyN Usage = 0x00070011
 	// KeyO identifies key o.
-	KeyO
+	KeyO Usage = 0x00070012
 	// KeyP identifies key p.
-	KeyP
+	KeyP Usage = 0x00070013
 	// KeyQ identifies key q.
-	KeyQ
+	KeyQ Usage = 0x00070014
 	// KeyR identifies key r.
-	KeyR
+	KeyR Usage = 0x00070015
 	// KeyS identifies key s.
-	KeyS
+	KeyS Usage = 0x00070016
 	// KeyT identifies key t.
-	KeyT
+	KeyT Usage = 0x00070017
 	// KeyU identifies key u.
-	KeyU
+	KeyU Usage = 0x00070018
 	// KeyV identifies key v.
-	KeyV
+	KeyV Usage = 0x00070019
 	// KeyW identifies key w.
-	KeyW
+	KeyW Usage = 0x0007001a
 	// KeyX identifies key x.
-	KeyX
+	KeyX Usage = 0x0007001b
 	// KeyY identifies key y.
-	KeyY
+	KeyY Usage = 0x0007001c
 	// KeyZ identifies key z.
-	KeyZ
+	KeyZ Usage = 0x0007001d
 	// Key1 identifies key1.
-	Key1
+	Key1 Usage = 0x0007001e
 	// Key2 identifies key2.
-	Key2
+	Key2 Usage = 0x0007001f
 	// Key3 identifies key3.
-	Key3
+	Key3 Usage = 0x00070020
 	// Key4 identifies key4.
-	Key4
+	Key4 Usage = 0x00070021
 	// Key5 identifies key5.
-	Key5
+	Key5 Usage = 0x00070022
 	// Key6 identifies key6.
-	Key6
+	Key6 Usage = 0x00070023
 	// Key7 identifies key7.
-	Key7
+	Key7 Usage = 0x00070024
 	// Key8 identifies key8.
-	Key8
+	Key8 Usage = 0x00070025
 	// Key9 identifies key9.
-	Key9
+	Key9 Usage = 0x00070026
 	// Key0 identifies key0.
-	Key0
+	Key0 Usage = 0x00070027
 	// KeyEnter identifies key enter.
-	KeyEnter
+	KeyEnter Usage = 0x00070028
 	// KeyEscape identifies key escape.
-	KeyEscape
+	KeyEscape Usage = 0x00070029
 	// KeyBackspace identifies key backspace.
-	KeyBackspace
+	KeyBackspace Usage = 0x0007002a
 	// KeyTab identifies key tab.
-	KeyTab
+	KeyTab Usage = 0x0007002b
 	// KeySpace identifies key space.
-	KeySpace
+	KeySpace Usage = 0x0007002c
 	// KeyMinus identifies key minus.
-	KeyMinus
+	KeyMinus Usage = 0x0007002d
 	// KeyEqual identifies key equal.
-	KeyEqual
+	KeyEqual Usage = 0x0007002e
 	// KeyLeftBracket identifies key left bracket.
-	KeyLeftBracket
+	KeyLeftBracket Usage = 0x0007002f
 	// KeyRightBracket identifies key right bracket.
-	KeyRightBracket
+	KeyRightBracket Usage = 0x00070030
 	// KeyBackslash identifies key backslash.
-	KeyBackslash
+	KeyBackslash Usage = 0x00070031
 	// KeyNonUSHash identifies key non ushash.
-	KeyNonUSHash
+	KeyNonUSHash Usage = 0x00070032
 	// KeySemicolon identifies key semicolon.
-	KeySemicolon
+	KeySemicolon Usage = 0x00070033
 	// KeyApostrophe identifies key apostrophe.
-	KeyApostrophe
+	KeyApostrophe Usage = 0x00070034
 	// KeyGrave identifies key grave.
-	KeyGrave
+	KeyGrave Usage = 0x00070035
 	// KeyComma identifies key comma.
-	KeyComma
+	KeyComma Usage = 0x00070036
 	// KeyPeriod identifies key period.
-	KeyPeriod
+	KeyPeriod Usage = 0x00070037
 	// KeySlash identifies key slash.
-	KeySlash
+	KeySlash Usage = 0x00070038
 	// KeyCapsLock identifies key caps lock.
-	KeyCapsLock
+	KeyCapsLock Usage = 0x00070039
 	// KeyF1 identifies key f1.
-	KeyF1
+	KeyF1 Usage = 0x0007003a
 	// KeyF2 identifies key f2.
-	KeyF2
+	KeyF2 Usage = 0x0007003b
 	// KeyF3 identifies key f3.
-	KeyF3
+	KeyF3 Usage = 0x0007003c
 	// KeyF4 identifies key f4.
-	KeyF4
+	KeyF4 Usage = 0x0007003d
 	// KeyF5 identifies key f5.
-	KeyF5
+	KeyF5 Usage = 0x0007003e
 	// KeyF6 identifies key f6.
-	KeyF6
+	KeyF6 Usage = 0x0007003f
 	// KeyF7 identifies key f7.
-	KeyF7
+	KeyF7 Usage = 0x00070040
 	// KeyF8 identifies key f8.
-	KeyF8
+	KeyF8 Usage = 0x00070041
 	// KeyF9 identifies key f9.
-	KeyF9
+	KeyF9 Usage = 0x00070042
 	// KeyF10 identifies key f10.
-	KeyF10
+	KeyF10 Usage = 0x00070043
 	// KeyF11 identifies key f11.
-	KeyF11
+	KeyF11 Usage = 0x00070044
 	// KeyF12 identifies key f12.
-	KeyF12
+	KeyF12 Usage = 0x00070045
 	// KeyPrintScreen identifies key print screen.
-	KeyPrintScreen
+	KeyPrintScreen Usage = 0x00070046
 	// KeyScrollLock identifies key scroll lock.
-	KeyScrollLock
+	KeyScrollLock Usage = 0x00070047
 	// KeyPause identifies key pause.
-	KeyPause
+	KeyPause Usage = 0x00070048
 	// KeyInsert identifies key insert.
-	KeyInsert
+	KeyInsert Usage = 0x00070049
 	// KeyHome identifies key home.
-	KeyHome
+	KeyHome Usage = 0x0007004a
 	// KeyPageUp identifies key page up.
-	KeyPageUp
+	KeyPageUp Usage = 0x0007004b
 	// KeyDelete identifies key delete.
-	KeyDelete
+	KeyDelete Usage = 0x0007004c
 	// KeyEnd identifies key end.
-	KeyEnd
+	KeyEnd Usage = 0x0007004d
 	// KeyPageDown identifies key page down.
-	KeyPageDown
+	KeyPageDown Usage = 0x0007004e
 	// KeyRight identifies key right.
-	KeyRight
+	KeyRight Usage = 0x0007004f
 	// KeyLeft identifies key left.
-	KeyLeft
+	KeyLeft Usage = 0x00070050
 	// KeyDown identifies key down.
-	KeyDown
+	KeyDown Usage = 0x00070051
 	// KeyUp identifies key up.
-	KeyUp
+	KeyUp Usage = 0x00070052
 	// KeyNumLock identifies key num lock.
-	KeyNumLock
+	KeyNumLock Usage = 0x00070053
 	// KeyKeypadDivide identifies key keypad divide.
-	KeyKeypadDivide
+	KeyKeypadDivide Usage = 0x00070054
 	// KeyKeypadMultiply identifies key keypad multiply.
-	KeyKeypadMultiply
+	KeyKeypadMultiply Usage = 0x00070055
 	// KeyKeypadSubtract identifies key keypad subtract.
-	KeyKeypadSubtract
+	KeyKeypadSubtract Usage = 0x00070056
 	// KeyKeypadAdd identifies key keypad add.
-	KeyKeypadAdd
+	KeyKeypadAdd Usage = 0x00070057
 	// KeyKeypadEnter identifies key keypad enter.
-	KeyKeypadEnter
+	KeyKeypadEnter Usage = 0x00070058
 	// KeyKeypad1 identifies key keypad1.
-	KeyKeypad1
+	KeyKeypad1 Usage = 0x00070059
 	// KeyKeypad2 identifies key keypad2.
-	KeyKeypad2
+	KeyKeypad2 Usage = 0x0007005a
 	// KeyKeypad3 identifies key keypad3.
-	KeyKeypad3
+	KeyKeypad3 Usage = 0x0007005b
 	// KeyKeypad4 identifies key keypad4.
-	KeyKeypad4
+	KeyKeypad4 Usage = 0x0007005c
 	// KeyKeypad5 identifies key keypad5.
-	KeyKeypad5
+	KeyKeypad5 Usage = 0x0007005d
 	// KeyKeypad6 identifies key keypad6.
-	KeyKeypad6
+	KeyKeypad6 Usage = 0x0007005e
 	// KeyKeypad7 identifies key keypad7.
-	KeyKeypad7
+	KeyKeypad7 Usage = 0x0007005f
 	// KeyKeypad8 identifies key keypad8.
-	KeyKeypad8
+	KeyKeypad8 Usage = 0x00070060
 	// KeyKeypad9 identifies key keypad9.
-	KeyKeypad9
+	KeyKeypad9 Usage = 0x00070061
 	// KeyKeypad0 identifies key keypad0.
-	KeyKeypad0
+	KeyKeypad0 Usage = 0x00070062
 	// KeyKeypadDecimal identifies key keypad decimal.
-	KeyKeypadDecimal
+	KeyKeypadDecimal Usage = 0x00070063
 	// KeyNonUSBackslash identifies key non usbackslash.
-	KeyNonUSBackslash
+	KeyNonUSBackslash Usage = 0x00070064
 	// KeyApplication identifies key application.
-	KeyApplication
+	KeyApplication Usage = 0x00070065
 	// KeyPower identifies key power.
-	KeyPower
+	KeyPower Usage = 0x00070066
 	// KeyKeypadEqual identifies key keypad equal.
-	KeyKeypadEqual
+	KeyKeypadEqual Usage = 0x00070067
 	// KeyF13 identifies key f13.
-	KeyF13
+	KeyF13 Usage = 0x00070068
 	// KeyF14 identifies key f14.
-	KeyF14
+	KeyF14 Usage = 0x00070069
 	// KeyF15 identifies key f15.
-	KeyF15
+	KeyF15 Usage = 0x0007006a
 	// KeyF16 identifies key f16.
-	KeyF16
+	KeyF16 Usage = 0x0007006b
 	// KeyF17 identifies key f17.
-	KeyF17
+	KeyF17 Usage = 0x0007006c
 	// KeyF18 identifies key f18.
-	KeyF18
+	KeyF18 Usage = 0x0007006d
 	// KeyF19 identifies key f19.
-	KeyF19
+	KeyF19 Usage = 0x0007006e
 	// KeyF20 identifies key f20.
-	KeyF20
+	KeyF20 Usage = 0x0007006f
 	// KeyF21 identifies key f21.
-	KeyF21
+	KeyF21 Usage = 0x00070070
 	// KeyF22 identifies key f22.
-	KeyF22
+	KeyF22 Usage = 0x00070071
 	// KeyF23 identifies key f23.
-	KeyF23
+	KeyF23 Usage = 0x00070072
 	// KeyF24 identifies key f24.
-	KeyF24
+	KeyF24 Usage = 0x00070073
 
 	// KeyLeftControl is the key left control value.
 	// Modifier usages identify HID keyboard modifiers.
-	KeyLeftControl Usage = 0x000700e0 + (iota - 205)
+	KeyLeftControl Usage = 0x000700e0
 	// KeyLeftShift identifies key left shift.
-	KeyLeftShift
+	KeyLeftShift Usage = 0x000700e1
 	// KeyLeftAlt identifies key left alt.
-	KeyLeftAlt
+	KeyLeftAlt Usage = 0x000700e2
 	// KeyLeftGUI identifies key left gui.
-	KeyLeftGUI
+	KeyLeftGUI Usage = 0x000700e3
 	// KeyRightControl identifies key right control.
-	KeyRightControl
+	KeyRightControl Usage = 0x000700e4
 	// KeyRightShift identifies key right shift.
-	KeyRightShift
+	KeyRightShift Usage = 0x000700e5
 	// KeyRightAlt identifies key right alt.
-	KeyRightAlt
+	KeyRightAlt Usage = 0x000700e6
 	// KeyRightGUI identifies key right gui.
-	KeyRightGUI
+	KeyRightGUI Usage = 0x000700e7
 
 	// KeyMute is the key mute value.
 	// Media usages identify HID consumer controls.
@@ -500,4 +500,8 @@ const (
 	KeyStop           Usage = 0x000c00b7
 	hatFourPositions  int64 = 4
 	hatEightPositions int64 = 8
+)
+
+const (
+	normalizedMinimum = float64(UsageUnknown)
 )

@@ -11,6 +11,7 @@ import (
 
 type (
 	// Retrier implements the application retry port with fixed discovery defaults.
-	Retrier   interface{ domain.Retrier }
-	retryFunc func(context.Context, func(context.Context) error, func(error) bool) error
+	Retrier interface{ domain.Retrier }
+	// RetryFunc adapts a bounded retry operation to the application retry port.
+	RetryFunc func(context.Context, func(context.Context) error, func(error) bool) error
 )
