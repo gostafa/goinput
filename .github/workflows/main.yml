@@ -7,7 +7,7 @@ on:
 
 jobs:
   taskotter:
-    name: CI
+    name: Taskotter
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -25,6 +25,7 @@ jobs:
           github-token: ${{ github.token }}
   pipeline:
     name: CI (${{ matrix.os }})
+    needs: taskotter
     strategy:
       fail-fast: false
       matrix:

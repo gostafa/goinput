@@ -12,7 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -20,693 +20,1360 @@ import (
 	extension "github.com/gostafa/goinput/extensions/evdev"
 	"github.com/gostafa/goinput/internal/domain"
 	"github.com/gostafa/goinput/internal/ports"
+	captureview "github.com/gostafa/goinput/internal/ports/capture"
 	native "github.com/holoplot/go-evdev"
 )
 
-func newBackend(ctx context.Context, retrier ports.Retrier) (ports.Backend, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+// Factory returns the native backend constructor.
+func Factory() ports.Factory {
+	return func(ctx context.Context, retrier ports.Retrier) (ports.Backend, error) {
+		backend, err := newBackend(ctx, retrier, defaultEnvironment())
+		if err != nil {
+			return nil, errors.Join(err)
+		}
+
+		return backend, nil
 	}
-	return &backend{
-		captures:  make(map[*capture]struct{}),
-		retrier:   retrier,
-		closeDone: make(chan struct{}),
-	}, nil
 }
 
-func (b *backend) Discover(ctx context.Context) ([]domain.DeviceInfo, error) {
-	if err := b.check(ctx); err != nil {
-		return nil, err
+func defaultEnvironment() environment {
+	return environment{
+		readDirectory: os.ReadDir,
+		openDevice: func(path string, flags int) (*device, error) {
+			return openNativeDevice(path, flags, native.OpenWithFlags)
+		},
 	}
-	var entries []os.DirEntry
-	read := func(ctx context.Context) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		var err error
-		entries, err = os.ReadDir(inputDirectory)
-		return err
+}
+
+func openNativeDevice(path string, flags int, open nativeOpener) (*device, error) {
+	endpoint, err := open(path, flags)
+
+	result, wrapErr := wrapOpenedDevice(endpoint, err)
+	if wrapErr != nil {
+		return nil, errors.Join(wrapErr)
 	}
-	var err error
-	if b.retrier != nil {
-		err = b.retrier.Do(ctx, read, transient)
-	} else {
-		err = read(ctx)
-	}
-	if errors.Is(err, os.ErrNotExist) {
-		return []domain.DeviceInfo{}, nil
-	}
+
+	return result, nil
+}
+
+func wrapOpenedDevice(endpoint *native.InputDevice, err error) (*device, error) {
 	if err != nil {
-		return nil, operationError("discover", "", err)
+		return nil, fmt.Errorf("open native device: %w", err)
 	}
-	infos := make([]domain.DeviceInfo, 0, len(entries))
+
+	return wrapNativeDevice(endpoint), nil
+}
+
+func wrapNativeDevice(endpoint *native.InputDevice) *device {
+	device := new(device)
+	configureDeviceMetadata(device, endpoint)
+	configureDeviceCapabilities(device, endpoint)
+
+	device.nonBlock, device.readOne, device.release = endpoint.NonBlock, endpoint.ReadOne, endpoint.Close
+
+	return device
+}
+
+func configureDeviceMetadata(device *device, endpoint *native.InputDevice) {
+	device.path, device.name, device.inputID = endpoint.Path, endpoint.Name, endpoint.InputID
+	device.uniqueID, device.physicalLocation = endpoint.UniqueID, endpoint.PhysicalLocation
+}
+
+func configureDeviceCapabilities(device *device, endpoint *native.InputDevice) {
+	device.properties, device.absInfos = endpoint.Properties, endpoint.AbsInfos
+	device.capableTypes, device.capableEvents = endpoint.CapableTypes, endpoint.CapableEvents
+}
+
+func newBackend(
+	ctx context.Context,
+	retrier ports.Retrier,
+	environment environment,
+) (*backendOperations, error) {
+	err := ctx.Err()
+	if err != nil {
+		return nil, fmt.Errorf("new backend: %w", err)
+	}
+
+	state := new(backend)
+
+	state.captures, state.retrier = make(map[*capture]struct{}), retrier
+	state.closeDone, state.environment = make(chan struct{}), environment
+
+	return backendView(state), nil
+}
+
+func backendView(state *backend) *backendOperations {
+	view := new(backendOperations)
+
+	view.Operations.Discover = func(ctx context.Context) ([]domain.DeviceInfo, error) {
+		return backendDiscover(ctx, state)
+	}
+	view.Operations.Close = func() error { return backendShutdown(state) }
+	configureBackendOpen(view, state)
+
+	return view
+}
+
+func backendDiscover(ctx context.Context, state *backend) ([]domain.DeviceInfo, error) {
+	err := backendCheck(ctx, state)
+	if err != nil {
+		return nil, errors.Join(err)
+	}
+
+	entries, readErr := backendReadEntries(ctx, state)
+	if readErr != nil {
+		return nil, errors.Join(operationError(discoverOperation, "", readErr))
+	}
+
+	result, err := backendDiscoverEntries(ctx, state, entries)
+
+	return result, errors.Join(err)
+}
+
+func backendReadEntries(ctx context.Context, state *backend) ([]os.DirEntry, error) {
+	var entries []os.DirEntry
+
+	read := func(ctx context.Context) error { return backendReadDirectory(ctx, state, &entries) }
+	err := backendRetry(ctx, state, read)
+
+	if errors.Is(err, os.ErrNotExist) {
+		return []os.DirEntry{}, nil
+	}
+
+	return entries, errors.Join(err)
+}
+
+func backendReadDirectory(ctx context.Context, state *backend, entries *[]os.DirEntry) error {
+	err := ctx.Err()
+	if err != nil {
+		return fmt.Errorf("read directory: %w", err)
+	}
+
+	*entries, err = state.environment.readDirectory(inputDirectory)
+
+	return errors.Join(err)
+}
+
+func backendRetry(ctx context.Context, state *backend, read func(context.Context) error) error {
+	if state.retrier != nil {
+		return errors.Join(state.retrier.Do(ctx, read, transient))
+	}
+
+	return errors.Join(read(ctx))
+}
+
+func backendDiscoverEntries(ctx context.Context, state *backend,
+	entries []os.DirEntry,
+) ([]domain.DeviceInfo, error) {
+	infos := make([]domain.DeviceInfo, nativeZero, len(entries))
+
 	var diagnostics []error
-	for _, entry := range entries {
-		if err := b.check(ctx); err != nil {
+
+	for idx := range entries {
+		err := backendCheck(ctx, state)
+		if err != nil {
 			return infos, errors.Join(append(diagnostics, err)...)
 		}
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "event") {
-			continue
-		}
-		path := filepath.Join(inputDirectory, entry.Name())
-		dev, openErr := native.OpenWithFlags(path, os.O_RDONLY)
-		if openErr != nil {
-			if errors.Is(openErr, os.ErrNotExist) || errors.Is(openErr, syscall.ENODEV) {
-				continue
-			}
-			diagnostics = append(
-				diagnostics,
-				operationError("discover", domain.DeviceID(devicePrefix+path), openErr),
-			)
-			continue
-		}
-		info, _, _, describeErr := describe(dev)
-		_ = dev.Close()
-		if describeErr != nil {
-			if errors.Is(describeErr, syscall.ENODEV) || errors.Is(describeErr, os.ErrNotExist) {
-				continue
-			}
-			diagnostics = append(
-				diagnostics,
-				operationError("discover", domain.DeviceID(devicePrefix+path), describeErr),
-			)
-			continue
-		}
-		infos = append(infos, info)
+
+		backendAppendDiscovered(
+			state,
+			entries[idx],
+			&discoveryResult{infos: &infos, diagnostics: &diagnostics},
+		)
 	}
-	if err := b.check(ctx); err != nil {
-		diagnostics = append(diagnostics, err)
-	}
-	return infos, errors.Join(diagnostics...)
+
+	return infos, errors.Join(append(diagnostics, backendCheck(ctx, state))...)
 }
 
-func (b *backend) Open(
-	ctx context.Context,
-	id domain.DeviceID,
-	sink ports.EventSink,
-) (ports.Capture, error) {
-	if err := b.check(ctx); err != nil {
-		return nil, err
+func backendAppendDiscovered(state *backend, entry os.DirEntry, result *discoveryResult) {
+	if entry.IsDir() || !strings.HasPrefix(entry.Name(), eventPrefix) {
+		return
 	}
+
+	info, err := backendDiscoverDevice(state, filepath.Join(inputDirectory, entry.Name()))
+	if disappeared(err) {
+		return
+	}
+
+	if err != nil {
+		*result.diagnostics = append(*result.diagnostics, err)
+
+		return
+	}
+
+	*result.infos = append(*result.infos, info)
+}
+
+func backendDiscoverDevice(state *backend, path string) (domain.DeviceInfo, error) {
+	endpoint, err := state.environment.openDevice(path, os.O_RDONLY)
+	if err != nil {
+		return domain.DeviceInfo{}, errors.Join(
+			operationError(discoverOperation, deviceID(path), err),
+		)
+	}
+
+	description, describeErr := describe(endpoint)
+
+	err = errors.Join(describeErr, endpoint.release())
+	if err != nil {
+		return domain.DeviceInfo{}, errors.Join(
+			operationError(discoverOperation, deviceID(path), err),
+		)
+	}
+
+	return description.info, nil
+}
+
+func disappeared(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENODEV)
+}
+func deviceID(path string) domain.DeviceID { return domain.DeviceID(devicePrefix + path) }
+
+func backendOpen(ctx context.Context, state *backend, request *openRequest) (*capture, error) {
+	err := backendCheck(ctx, state)
+	if err != nil {
+		return nil, errors.Join(err)
+	}
+
+	path, valid := devicePath(request.id)
+	if !valid {
+		return nil, errors.Join(operationError(openOperation, request.id, domain.ErrNotFound))
+	}
+
+	result, err := backendOpenDevice(ctx, state, &deviceOpenRequest{request: request, path: path})
+	if err != nil {
+		return nil, errors.Join(err)
+	}
+
+	return result, nil
+}
+
+func devicePath(id domain.DeviceID) (string, bool) {
 	path, valid := strings.CutPrefix(string(id), devicePrefix)
-	if !valid || filepath.Dir(path) != inputDirectory ||
-		!strings.HasPrefix(filepath.Base(path), "event") {
-		return nil, operationError("open", id, domain.ErrNotFound)
-	}
-	dev, err := native.OpenWithFlags(path, os.O_RDONLY)
-	if err != nil {
-		return nil, operationError("open", id, err)
-	}
-	info, caps, details, err := describe(dev)
-	if err != nil {
-		_ = dev.Close()
-		return nil, operationError("open", id, err)
-	}
-	c := &capture{
-		owner:  b,
-		device: dev,
-		sink:   sink,
-		info:   info,
-		caps:   caps,
-		native: details,
-		controls: make(
-			map[eventCode]domain.Control,
-		),
-		hats:       make(map[int]*hat),
-		hatCodes:   make(map[eventCode]int),
-		suppressed: make(map[eventCode]bool),
-		stop:       make(chan struct{}),
-		done:       make(chan struct{}),
-	}
-	c.prepare()
-	// Metadata ioctls must precede NonBlock: upstream Fd() calls otherwise
-	// restore blocking mode and prevent Close from interrupting a pending read.
-	if err := dev.NonBlock(); err != nil {
-		_ = dev.Close()
-		return nil, operationError("open", id, err)
-	}
-	b.mu.Lock()
-	if b.closed || ctx.Err() != nil {
-		b.mu.Unlock()
-		_ = dev.Close()
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		return nil, operationError("open", id, domain.ErrClosed)
-	}
-	b.captures[c] = struct{}{}
-	b.mu.Unlock()
-	go c.read()
-	return c, nil
+
+	return path, valid && filepath.Dir(path) == inputDirectory &&
+		strings.HasPrefix(filepath.Base(path), eventPrefix)
 }
 
-func (b *backend) Close() error {
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
-		<-b.closeDone
-		return b.closeErr
+func backendOpenDevice(
+	ctx context.Context,
+	state *backend,
+	open *deviceOpenRequest,
+) (*capture, error) {
+	endpoint, err := state.environment.openDevice(open.path, os.O_RDONLY)
+	if err != nil {
+		return nil, errors.Join(operationError(openOperation, open.request.id, err))
 	}
-	b.closed = true
-	captures := make([]*capture, 0, len(b.captures))
-	for c := range b.captures {
-		captures = append(captures, c)
+
+	capture, setupErr := backendPrepareCapture(state, endpoint, open.request.sink)
+	if setupErr != nil {
+		return nil, errors.Join(closeOpenFailure(endpoint, open.request.id, setupErr))
 	}
-	b.mu.Unlock()
-	var errs []error
-	for _, c := range captures {
-		if err := c.Close(); err != nil {
-			errs = append(errs, err)
-		}
+
+	result, err := backendStartCapture(ctx, state, capture)
+	if err != nil {
+		return nil, errors.Join(err)
 	}
-	b.closeErr = errors.Join(errs...)
-	close(b.closeDone)
-	return b.closeErr
+
+	return result, nil
 }
 
-func (b *backend) check(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
+func closeOpenFailure(endpoint *device, id domain.DeviceID, err error) error {
+	return errors.Join(operationError(openOperation, id, errors.Join(err, endpoint.release())))
+}
+
+func backendPrepareCapture(
+	state *backend,
+	endpoint *device,
+	sink ports.EventSink,
+) (*capture, error) {
+	description, err := describe(endpoint)
+	if err != nil {
+		return nil, errors.Join(err)
 	}
-	b.mu.Lock()
-	closed := b.closed
-	b.mu.Unlock()
-	if closed {
-		return operationError("device", "", domain.ErrClosed)
+
+	capture := newCapture(state, endpoint, sink)
+
+	configureCapture(capture, description)
+
+	// Fd() restores blocking mode; issue all metadata ioctls before NonBlock.
+	err = endpoint.nonBlock()
+	if err != nil {
+		return nil, errors.Join(err)
 	}
+
+	return capture, nil
+}
+
+func newCapture(owner *backend, endpoint *device, sink ports.EventSink) *capture {
+	capture := new(capture)
+
+	capture.device, capture.sink = endpoint, sink
+	capture.unregister = func() { backendUnregister(owner, capture) }
+	capture.controls, capture.hats = make(map[eventCode]domain.Control), make(map[int]*hat)
+	capture.hatCodes, capture.suppressed = make(map[eventCode]int), make(map[eventCode]bool)
+	capture.stop, capture.done = make(chan struct{}), make(chan struct{})
+
+	return capture
+}
+
+func backendStartCapture(ctx context.Context, state *backend, capture *capture) (*capture, error) {
+	err := backendRegisterCapture(ctx, state, capture)
+	if err != nil {
+		return nil, errors.Join(closeOpenFailure(capture.device, capture.info.ID, err))
+	}
+
+	go captureRead(capture)
+
+	return capture, nil
+}
+
+func backendRegisterCapture(ctx context.Context, state *backend, capture *capture) error {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	err := ctx.Err()
+	if err != nil {
+		return fmt.Errorf("register capture: %w", err)
+	}
+
+	if state.closed {
+		return errors.Join(operationError(openOperation, capture.info.ID, domain.ErrClosed))
+	}
+
+	state.captures[capture] = struct{}{}
+
 	return nil
 }
 
-func (c *capture) Info() domain.DeviceInfo { return domain.CloneInfo(&c.info) }
+func backendShutdown(state *backend) error {
+	captures, started := backendBeginClose(state)
+	if !started {
+		<-state.closeDone
 
-func (c *capture) Capabilities() domain.Capabilities { return domain.CloneCapabilities(&c.caps) }
+		return errors.Join(state.closeErr)
+	}
 
-func (c *capture) Extension(target any) bool {
+	state.closeErr = closeCaptures(captures)
+	close(state.closeDone)
+
+	return errors.Join(state.closeErr)
+}
+
+func backendBeginClose(state *backend) ([]*capture, bool) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if state.closed {
+		return nil, false
+	}
+
+	state.closed = true
+
+	captures := make([]*capture, nativeZero, len(state.captures))
+
+	for capture := range state.captures {
+		captures = append(captures, capture)
+	}
+
+	return captures, true
+}
+
+func closeCaptures(captures []*capture) error {
+	errs := make([]error, nativeZero, len(captures))
+
+	for idx := range captures {
+		errs = append(errs, captureClose(captures[idx]))
+	}
+
+	return errors.Join(errs...)
+}
+
+func backendCheck(ctx context.Context, state *backend) error {
+	err := ctx.Err()
+	if err != nil {
+		return fmt.Errorf("check backend: %w", err)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if state.closed {
+		return errors.Join(operationError(deviceOperation, "", domain.ErrClosed))
+	}
+
+	return nil
+}
+
+func captureInfo(capture *capture) domain.DeviceInfo { return domain.CloneInfo(&capture.info) }
+func captureCapabilities(capture *capture) domain.Capabilities {
+	return domain.CloneCapabilities(&capture.caps)
+}
+
+func captureExtension(capture *capture, target any) bool {
 	switch target := target.(type) {
 	case *extension.Info:
-		if target == nil {
-			return false
-		}
-		*target = c.NativeInfo()
-		return true
+		return captureCopyExtensionInfo(capture, target)
 	case *extension.Metadata:
 		if target == nil {
 			return false
 		}
-		*target = c
+
+		*target = metadataView[extension.Info](
+			func() extension.Info { return captureNativeInfo(capture) },
+		)
+
 		return true
 	default:
 		return false
 	}
 }
 
-func (c *capture) NativeInfo() extension.Info {
-	info := c.native
-	info.Properties = append([]uint16(nil), info.Properties...)
-	info.Controls = append([]extension.NativeControl(nil), info.Controls...)
-	info.Axes = make(map[uint16]extension.AxisInfo, len(c.native.Axes))
-	for code, axis := range c.native.Axes {
-		info.Axes[code] = axis
+func captureCopyExtensionInfo(capture *capture, target *extension.Info) bool {
+	if target == nil {
+		return false
 	}
+
+	*target = captureNativeInfo(capture)
+
+	return true
+}
+
+func captureNativeInfo(capture *capture) extension.Info {
+	info := capture.native
+
+	info.Properties = slices.Clone(info.Properties)
+	info.Controls = slices.Clone(info.Controls)
+	info.Axes = cloneAxes(capture.native.Axes)
+
 	return info
 }
 
-func (c *capture) stopReader() {
-	c.closeOnce.Do(func() {
-		close(c.stop)
-		c.closeErr = c.device.Close()
-		if errors.Is(c.closeErr, os.ErrClosed) {
-			c.closeErr = nil
+func cloneAxes(axes map[uint16]extension.AxisInfo) map[uint16]extension.AxisInfo {
+	cloned := make(map[uint16]extension.AxisInfo, len(axes))
+	for code := range axes {
+		cloned[code] = axes[code]
+	}
+
+	return cloned
+}
+
+func captureStopReader(capture *capture) {
+	capture.closeOnce.Do(func() {
+		close(capture.stop)
+
+		capture.closeErr = capture.device.release()
+		if errors.Is(capture.closeErr, os.ErrClosed) {
+			capture.closeErr = nil
 		}
 	})
 }
 
-func (c *capture) Close() error {
-	c.stopReader()
-	<-c.done
-	return c.closeErr
+func captureClose(capture *capture) error {
+	captureStopReader(capture)
+	<-capture.done
+
+	return errors.Join(capture.closeErr)
 }
 
-func (c *capture) read() {
-	defer func() {
-		c.stopReader()
-		c.owner.mu.Lock()
-		delete(c.owner.captures, c)
-		c.owner.mu.Unlock()
-		close(c.done)
-	}()
-	for {
-		event, err := c.device.ReadOne()
-		if err != nil {
-			select {
-			case <-c.stop:
-				return
-			default:
-			}
-			if errors.Is(err, syscall.EINTR) {
-				continue
-			}
-			c.sink.Fail(operationError("read", c.info.ID, err))
-			return
-		}
-		select {
-		case <-c.stop:
-			return
-		default:
-		}
-		if !c.dispatch(event) {
-			return
-		}
+func captureFinishReader(capture *capture) {
+	captureStopReader(capture)
+	capture.unregister()
+	close(capture.done)
+}
+
+func captureRead(capture *capture) {
+	defer captureFinishReader(capture)
+
+	for captureReadNext(capture) {
 	}
 }
 
-func (c *capture) dispatch(event *native.InputEvent) bool {
-	received := time.Now()
-	timestamp := domain.Timestamp{
-		Time:       time.Unix(int64(event.Time.Sec), int64(event.Time.Usec)*1000).UTC(),
-		ReceivedAt: received,
-		Source:     domain.TimestampNative,
+func captureStopped(capture *capture) bool {
+	select {
+	case <-capture.stop:
+		return true
+	default:
+		return false
 	}
+}
+
+func captureReadNext(capture *capture) bool {
+	event, err := capture.device.readOne()
+	if captureStopped(capture) {
+		return false
+	}
+
+	if err != nil {
+		return captureReadFailure(capture, err)
+	}
+
+	return captureDispatch(capture, event)
+}
+
+func captureReadFailure(capture *capture, err error) bool {
+	if errors.Is(err, syscall.EINTR) {
+		return true
+	}
+
+	capture.sink.Fail(operationError(readOperation, capture.info.ID, err))
+
+	return false
+}
+
+func eventTimestamp(event *native.InputEvent) domain.Timestamp {
+	return domain.Timestamp{
+		Time:       time.Unix(event.Time.Sec, event.Time.Usec*int64(time.Microsecond)).UTC(),
+		ReceivedAt: time.Now(), Source: domain.TimestampNative,
+	}
+}
+
+func captureDispatch(capture *capture, event *native.InputEvent) bool {
+	timestamp := eventTimestamp(event)
 	if event.Type == native.EV_SYN {
-		switch event.Code {
-		case native.SYN_DROPPED:
-			c.sink.Fail(operationError("read", c.info.ID, domain.ErrEventLoss))
+		return captureDispatchSync(capture, event.Code, &timestamp)
+	}
+
+	code := eventCode{typeCode: event.Type, code: event.Code}
+	if capture.suppressed[code] {
+		return true
+	}
+
+	if captureUpdateHat(capture, &code, event.Value) {
+		return true
+	}
+
+	return captureDispatchControl(capture, event, &timestamp)
+}
+
+func captureDispatchSync(capture *capture, code native.EvCode, timestamp *domain.Timestamp) bool {
+	switch code {
+	case native.SYN_DROPPED:
+		return captureEventLoss(capture)
+	case native.SYN_REPORT:
+		return capturePublishHats(capture, timestamp)
+	default:
+		return true
+	}
+}
+
+func captureEventLoss(capture *capture) bool {
+	capture.sink.Fail(operationError(readOperation, capture.info.ID, domain.ErrEventLoss))
+
+	return false
+}
+
+func capturePublishHats(capture *capture, timestamp *domain.Timestamp) bool {
+	for idx := range nativeFour {
+		if !capturePublishHat(capture, capture.hats[idx], timestamp) {
 			return false
-		case native.SYN_REPORT:
-			for index := 0; index < 4; index++ {
-				hat := c.hats[index]
-				if hat == nil || !hat.dirty {
-					continue
-				}
-				hat.dirty = false
-				if hat.x < -1 || hat.x > 1 || hat.y < -1 || hat.y > 1 {
-					c.sink.Fail(operationError("read", c.info.ID, domain.ErrEventLoss))
-					return false
-				}
-				value := hatValue(hat.x, hat.y)
-				if value == hat.last {
-					continue
-				}
-				hat.last = value
-				if !c.sink.Publish(
-					&domain.Event{
-						DeviceID:  c.info.ID,
-						ControlID: hat.id,
-						Action:    domain.ActionChange,
-						Value:     float64(value),
-						Timestamp: timestamp,
-					},
-				) {
-					return false
-				}
-			}
-		}
-		return true
-	}
-	code := eventCode{event.Type, event.Code}
-	if c.suppressed[code] {
-		return true
-	}
-	if index, ok := c.hatCodes[code]; ok {
-		hat := c.hats[index]
-		if (int(event.Code)-int(native.ABS_HAT0X))%2 == 0 {
-			hat.x = event.Value
-		} else {
-			hat.y = event.Value
-		}
-		hat.dirty = true
-		return true
-	}
-	control, ok := c.controls[code]
-	if !ok || control.Support != domain.SupportSupported {
-		return true
-	}
-	value := float64(event.Value)
-	action := domain.ActionChange
-	if event.Type == native.EV_KEY {
-		switch event.Value {
-		case 0:
-			action = domain.ActionRelease
-		case 1:
-			action = domain.ActionPress
-		case 2:
-			action = domain.ActionRepeat
-			value = 1
-		default:
-			return true
 		}
 	}
-	if event.Type == native.EV_REL &&
-		(event.Code == native.REL_WHEEL_HI_RES || event.Code == native.REL_HWHEEL_HI_RES) {
-		value /= wheelDetent
+
+	return true
+}
+
+func capturePublishHat(capture *capture, hat *hat, timestamp *domain.Timestamp) bool {
+	if hat == nil || !hat.dirty {
+		return true
 	}
-	return c.sink.Publish(
+
+	hat.dirty = false
+	if !validHat(hat.x, hat.y) {
+		return captureEventLoss(capture)
+	}
+
+	return capturePublishHatValue(capture, hat, timestamp)
+}
+
+func capturePublishHatValue(capture *capture, hat *hat, timestamp *domain.Timestamp) bool {
+	value := hatValue(hat.x, hat.y)
+	if value == hat.last {
+		return true
+	}
+
+	hat.last = value
+
+	return capturePublish(
+		capture,
+		hat.id,
 		&domain.Event{
-			DeviceID:  c.info.ID,
-			ControlID: control.ID,
-			Action:    action,
-			Value:     value,
-			Timestamp: timestamp,
+			DeviceID:  "",
+			ControlID: "",
+			Value:     float64(value),
+			Action:    domain.ActionChange,
+			Timestamp: *timestamp,
 		},
 	)
 }
 
-func (c *capture) prepare() {
-	for _, code := range c.native.Controls {
-		key := eventCode{native.EvType(code.Type), native.EvCode(code.Code)}
-		for _, control := range c.caps.Controls {
-			if string(control.ID) == code.ID {
-				c.controls[key] = control
-				break
-			}
-		}
+func captureUpdateHat(capture *capture, code *eventCode, value int32) bool {
+	idx, ok := capture.hatCodes[*code]
+	if !ok {
+		return false
 	}
-	for _, pair := range [][2]native.EvCode{{native.REL_WHEEL, native.REL_WHEEL_HI_RES}, {native.REL_HWHEEL, native.REL_HWHEEL_HI_RES}} {
-		if _, ok := c.controls[eventCode{native.EV_REL, pair[1]}]; ok {
-			id := c.controls[eventCode{native.EV_REL, pair[1]}].ID
-			for i := range c.native.Controls {
-				code := &c.native.Controls[i]
-				if code.Type == uint16(native.EV_REL) && code.Code == uint16(pair[0]) {
-					code.ID = string(id)
-				}
-			}
-			c.suppressed[eventCode{native.EV_REL, pair[0]}] = true
-			delete(c.controls, eventCode{native.EV_REL, pair[0]})
-		}
-	}
-	for index := 0; index < 4; index++ {
-		xCode := uint16(native.ABS_HAT0X) + uint16(index*2)
-		yCode := xCode + 1
-		x, hasX := c.native.Axes[xCode]
-		y, hasY := c.native.Axes[yCode]
-		if !hasX || !hasY || x.Minimum != -1 || x.Maximum != 1 || y.Minimum != -1 ||
-			y.Maximum != 1 {
-			continue
-		}
-		id := domain.ControlID(fmt.Sprintf("evdev:hat:%d", index))
-		c.hats[index] = &hat{id: id, x: x.Value, y: y.Value, last: hatValue(x.Value, y.Value)}
-		c.hatCodes[eventCode{native.EV_ABS, native.EvCode(xCode)}] = index
-		c.hatCodes[eventCode{native.EV_ABS, native.EvCode(yCode)}] = index
-		delete(c.controls, eventCode{native.EV_ABS, native.EvCode(xCode)})
-		delete(c.controls, eventCode{native.EV_ABS, native.EvCode(yCode)})
-		for i := range c.native.Controls {
-			code := &c.native.Controls[i]
-			if code.Type == uint16(native.EV_ABS) && (code.Code == xCode || code.Code == yCode) {
-				code.ID = string(id)
-			}
-		}
-	}
-	c.caps.Controls = c.caps.Controls[:0]
-	for _, control := range c.controls {
-		c.caps.Controls = append(c.caps.Controls, control)
-	}
-	for index, hat := range c.hats {
-		c.caps.Controls = append(c.caps.Controls, domain.Control{
-			ID:   hat.id,
-			Name: fmt.Sprintf("Hat %d", index),
-			Kind: domain.ControlHat,
-			Usage: domain.HID(
-				desktopPage,
-				0x39,
-			),
-			Mapping: domain.MappingInferred,
-			Mode:    domain.AxisAbsolute,
-			Range: &domain.Range{
-				Min: int64(domain.HatNeutral),
-				Max: int64(domain.HatNorthWest),
-			},
-			Unit:    domain.UnitDirection,
-			Support: domain.SupportSupported,
-		})
-	}
-	sort.Slice(
-		c.caps.Controls,
-		func(i, j int) bool { return c.caps.Controls[i].ID < c.caps.Controls[j].ID },
-	)
+
+	hat := capture.hats[idx]
+	setHatAxis(hat, code.code, value)
+
+	hat.dirty = true
+
+	return true
 }
 
-func hatValue(x, y int32) int64 {
-	if x < -1 || x > 1 || y < -1 || y > 1 {
+func setHatAxis(hat *hat, code native.EvCode, value int32) {
+	if (code-native.ABS_HAT0X)%nativeTwo == nativeZero {
+		hat.x = value
+
+		return
+	}
+
+	hat.y = value
+}
+
+func captureDispatchControl(capture *capture,
+	event *native.InputEvent,
+	timestamp *domain.Timestamp,
+) bool {
+	control, ok := capture.controls[eventCode{typeCode: event.Type, code: event.Code}]
+	if !ok || control.Support != domain.SupportSupported {
+		return true
+	}
+
+	value := normalizedEvent(event, timestamp)
+	if value.Action == domain.ActionUnknown {
+		return true
+	}
+
+	return capturePublish(capture, control.ID, value)
+}
+
+func normalizedEvent(event *native.InputEvent, timestamp *domain.Timestamp) *domain.Event {
+	value := new(domain.Event)
+
+	value.Value, value.Action, value.Timestamp = float64(
+		event.Value,
+	), domain.ActionChange, *timestamp
+
+	if event.Type == native.EV_KEY {
+		value.Action, value.Value = keyAction(event.Value)
+	}
+
+	if highResolutionWheel(event.Type, event.Code) {
+		value.Value /= wheelDetent
+	}
+
+	return value
+}
+
+func keyAction(value int32) (action domain.EventAction, normalized float64) {
+	actions := map[int32]domain.EventAction{
+		nativeZero: domain.ActionRelease,
+		nativeOne:  domain.ActionPress,
+		nativeTwo:  domain.ActionRepeat,
+	}
+	if value == nativeTwo {
+		return actions[value], nativeOne
+	}
+
+	var ok bool
+
+	action, ok = actions[value]
+
+	if !ok {
+		return domain.ActionUnknown, float64(value)
+	}
+
+	return action, float64(value)
+}
+
+func highResolutionWheel(eventType native.EvType, code native.EvCode) bool {
+	return eventType == native.EV_REL &&
+		(code == native.REL_WHEEL_HI_RES || code == native.REL_HWHEEL_HI_RES)
+}
+
+func capturePublish(capture *capture, id domain.ControlID, event *domain.Event) bool {
+	event.DeviceID, event.ControlID = capture.info.ID, id
+
+	return capture.sink.Publish(event)
+}
+
+func capturePrepare(capture *capture) {
+	capturePrepareControls(capture)
+	capturePrepareWheels(capture)
+	capturePrepareHats(capture)
+	captureRebuildCapabilities(capture)
+}
+
+func capturePrepareControls(capture *capture) {
+	for idx := range capture.native.Controls {
+		capturePrepareControl(capture, &capture.native.Controls[idx])
+	}
+}
+
+func capturePrepareControl(capture *capture, code *extension.NativeControl) {
+	for idx := range capture.caps.Controls {
+		control := &capture.caps.Controls[idx]
+		if string(control.ID) == code.ID {
+			capture.controls[eventCode{typeCode: native.EvType(code.Type), code: native.EvCode(code.Code)}] = *control
+
+			return
+		}
+	}
+}
+
+func wheelPairs() []wheelPair {
+	return []wheelPair{
+		{low: native.REL_WHEEL, high: native.REL_WHEEL_HI_RES},
+		{low: native.REL_HWHEEL, high: native.REL_HWHEEL_HI_RES},
+	}
+}
+
+func capturePrepareWheels(capture *capture) {
+	pairs := wheelPairs()
+	for idx := range pairs {
+		capturePrepareWheel(capture, &pairs[idx])
+	}
+}
+
+func capturePrepareWheel(capture *capture, pair *wheelPair) {
+	high := eventCode{typeCode: native.EV_REL, code: pair.high}
+	control, ok := capture.controls[high]
+
+	if !ok {
+		return
+	}
+
+	low := eventCode{typeCode: native.EV_REL, code: pair.low}
+	captureRenameNativeControl(capture, &low, control.ID)
+
+	capture.suppressed[low] = true
+	delete(capture.controls, low)
+}
+
+func captureRenameNativeControl(capture *capture, key *eventCode, id domain.ControlID) {
+	for idx := range capture.native.Controls {
+		code := &capture.native.Controls[idx]
+		if native.EvType(code.Type) == key.typeCode && native.EvCode(code.Code) == key.code {
+			code.ID = string(id)
+		}
+	}
+}
+
+func capturePrepareHats(capture *capture) {
+	for idx := range nativeFour {
+		capturePrepareHat(capture, idx)
+	}
+}
+
+func capturePrepareHat(capture *capture, idx int) {
+	xCode := hatAxisCode(idx)
+	yCode := xCode + nativeOne
+	xAxis, hasX := capture.native.Axes[uint16(xCode)]
+	yAxis, hasY := capture.native.Axes[uint16(yCode)]
+
+	if !hasX || !hasY || !hatAxis(&xAxis) || !hatAxis(&yAxis) {
+		return
+	}
+
+	capture.hats[idx] = newHat(idx, &xAxis, &yAxis)
+	captureRegisterHatAxis(capture, idx, xCode)
+	captureRegisterHatAxis(capture, idx, yCode)
+}
+
+func hatAxis(axis *extension.AxisInfo) bool {
+	return axis.Minimum == hatMinimum && axis.Maximum == nativeOne
+}
+
+func captureRegisterHatAxis(capture *capture, idx int, code native.EvCode) {
+	key := eventCode{typeCode: native.EV_ABS, code: code}
+
+	capture.hatCodes[key] = idx
+	delete(capture.controls, key)
+	captureRenameNativeControl(capture, &key, capture.hats[idx].id)
+}
+
+func captureRebuildCapabilities(capture *capture) {
+	capture.caps.Controls = capture.caps.Controls[:nativeZero]
+	for key := range capture.controls {
+		capture.caps.Controls = append(capture.caps.Controls, capture.controls[key])
+	}
+
+	for idx := range capture.hats {
+		capture.caps.Controls = append(capture.caps.Controls, hatControl(idx, capture.hats[idx].id))
+	}
+
+	sortControls(capture.caps.Controls)
+}
+
+func sortControls(controls []domain.Control) {
+	ordered := make([]*domain.Control, nativeZero, len(controls))
+	for idx := range controls {
+		ordered = append(ordered, &controls[idx])
+	}
+
+	slices.SortFunc(ordered, compareControlPointers)
+
+	copied := make([]domain.Control, nativeZero, len(controls))
+
+	for idx := range ordered {
+		copied = append(copied, *ordered[idx])
+	}
+
+	copy(controls, copied)
+}
+
+func compareControlPointers(left, right *domain.Control) int {
+	return strings.Compare(string(left.ID), string(right.ID))
+}
+
+func hatControl(idx int, id domain.ControlID) domain.Control {
+	control := new(domain.Control)
+
+	control.ID, control.Name, control.Kind = id, fmt.Sprintf("Hat %d", idx), domain.ControlHat
+	control.Usage, control.Mapping, control.Mode = domain.HID(
+		nativeOne,
+		hatUsage,
+	), domain.MappingInferred, domain.AxisAbsolute
+	control.Range = &domain.Range{Min: int64(domain.HatNeutral), Max: int64(domain.HatNorthWest)}
+	control.Unit, control.Support = domain.UnitDirection, domain.SupportSupported
+
+	return *control
+}
+
+func validHat(horizontal, vertical int32) bool {
+	return horizontal >= hatMinimum && horizontal <= nativeOne && vertical >= hatMinimum &&
+		vertical <= nativeOne
+}
+
+func hatValue(horizontal, vertical int32) int64 {
+	if !validHat(horizontal, vertical) {
 		return int64(domain.HatNeutral)
 	}
-	directions := [3][3]domain.HatDirection{
+
+	directions := [nativeThree][nativeThree]domain.HatDirection{
 		{domain.HatNorthWest, domain.HatWest, domain.HatSouthWest},
 		{domain.HatNorth, domain.HatNeutral, domain.HatSouth},
 		{domain.HatNorthEast, domain.HatEast, domain.HatSouthEast},
 	}
-	return int64(directions[x+1][y+1])
+
+	return int64(directions[horizontal+nativeOne][vertical+nativeOne])
 }
 
-func describe(
-	dev *native.InputDevice,
-) (domain.DeviceInfo, domain.Capabilities, extension.Info, error) {
-	path := dev.Path()
-	info := domain.DeviceInfo{
-		Transport: domain.TransportUnknown,
-		ID:        domain.DeviceID(devicePrefix + path),
-		Path:      path,
-	}
-	name, err := dev.Name()
+func describe(endpoint *device) (*description, error) {
+	description := new(description)
+
+	err := describeIdentity(endpoint, description)
 	if err != nil {
-		return info, domain.Capabilities{}, extension.Info{}, err
+		return nil, errors.Join(err)
 	}
-	info.Name = name
-	id, err := dev.InputID()
+
+	err = describeAxes(endpoint, description)
 	if err != nil {
-		return info, domain.Capabilities{}, extension.Info{}, err
+		return nil, errors.Join(err)
 	}
-	info.VendorID, info.ProductID = &id.Vendor, &id.Product
-	info.Transport = transport(id.BusType)
-	info.Serial, _ = dev.UniqueID()
-	details := extension.Info{
-		BusType: id.BusType,
-		Version: id.Version,
-		Axes:    make(map[uint16]extension.AxisInfo),
-	}
-	details.PhysicalLocation, _ = dev.PhysicalLocation()
-	for _, property := range dev.Properties() {
-		details.Properties = append(details.Properties, uint16(property))
-	}
-	abs, err := dev.AbsInfos()
+
+	describeCapabilities(endpoint, description)
+
+	return description, nil
+}
+
+func describeIdentity(endpoint *device, description *description) error {
+	setDevicePath(description, endpoint.path())
+
+	name, err := endpoint.name()
 	if err != nil {
-		return info, domain.Capabilities{}, details, err
+		return fmt.Errorf("device name: %w", err)
 	}
-	for code, axis := range abs {
-		details.Axes[uint16(code)] = extension.AxisInfo{
-			Value:      axis.Value,
-			Minimum:    axis.Minimum,
-			Maximum:    axis.Maximum,
-			Fuzz:       axis.Fuzz,
-			Flat:       axis.Flat,
-			Resolution: axis.Resolution,
-		}
+
+	description.info.Name = name
+
+	id, idErr := endpoint.inputID()
+	if idErr != nil {
+		return fmt.Errorf("device identity: %w", idErr)
 	}
-	// Upstream capability queries suppress errors, so completeness cannot be
-	// established even when the returned schema appears complete.
-	caps := domain.Capabilities{Complete: false, Repeat: domain.SupportUnknown}
+
+	setIdentity(description, &id)
+
+	return errors.Join(describeOptionalIdentity(endpoint, description))
+}
+
+func setIdentity(description *description, id *native.InputID) {
+	description.info.VendorID, description.info.ProductID = &id.Vendor, &id.Product
+	description.info.Transport = transport(id.BusType)
+	description.native.BusType, description.native.Version = id.BusType, id.Version
+}
+
+func describeOptionalIdentity(endpoint *device, description *description) error {
+	serial, err := optionalString(endpoint.uniqueID)
+	if err != nil {
+		return errors.Join(err)
+	}
+
+	description.info.Serial = serial
+
+	location, locationErr := optionalString(endpoint.physicalLocation)
+
+	description.native.PhysicalLocation = location
+
+	return errors.Join(locationErr)
+}
+
+func optionalString(query func() (string, error)) (string, error) {
+	value, err := query()
+	if optionalIdentityMissing(err) {
+		return "", nil
+	}
+
+	return value, errors.Join(err)
+}
+
+func optionalIdentityMissing(err error) bool {
+	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENOTTY) ||
+		errors.Is(err, syscall.EINVAL)
+}
+
+func describeAxes(endpoint *device, description *description) error {
+	setProperties(description, endpoint.properties())
+
+	axes, err := endpoint.absInfos()
+	if err != nil {
+		return fmt.Errorf("device axes: %w", err)
+	}
+
+	description.native.Axes = make(map[uint16]extension.AxisInfo, len(axes))
+	for code := range axes {
+		axis := axes[code]
+
+		description.native.Axes[uint16(code)] = axisInfo(&axis)
+	}
+
+	return nil
+}
+
+func axisInfo(axis *native.AbsInfo) extension.AxisInfo {
+	return extension.AxisInfo{
+		Value: axis.Value, Minimum: axis.Minimum, Maximum: axis.Maximum,
+		Fuzz: axis.Fuzz, Flat: axis.Flat, Resolution: axis.Resolution,
+	}
+}
+
+func describeCapabilities(endpoint *device, description *description) {
+	// Upstream capability queries suppress errors, so completeness remains unknown.
+	description.caps.Repeat = domain.SupportUnknown
+
 	keys := make(map[native.EvCode]bool)
-	for _, eventType := range dev.CapableTypes() {
-		if eventType == native.EV_REP {
-			caps.Repeat = domain.SupportSupported
-		}
-		if eventType != native.EV_KEY && eventType != native.EV_REL && eventType != native.EV_ABS &&
-			eventType != native.EV_SW &&
-			eventType != native.EV_MSC &&
-			eventType != native.EV_FF_STATUS {
-			continue
-		}
-		for _, code := range dev.CapableEvents(eventType) {
-			if eventType == native.EV_KEY {
-				keys[code] = true
-			}
-			control := controlFor(eventType, code, abs)
-			caps.Controls = append(caps.Controls, control)
-			details.Controls = append(
-				details.Controls,
-				extension.NativeControl{
-					ID:   string(control.ID),
-					Type: uint16(eventType),
-					Code: uint16(code),
-				},
-			)
-		}
+	types := endpoint.capableTypes()
+
+	for idx := range types {
+		describeEventType(
+			endpoint,
+			description,
+			&eventTypeRequest{eventType: types[idx], keys: keys},
+		)
 	}
-	if keys[native.KEY_A] || keys[native.KEY_ENTER] || keys[native.KEY_SPACE] {
-		info.Classes = append(info.Classes, domain.ClassKeyboard)
-	}
-	if keys[native.BTN_LEFT] {
-		info.Classes = append(info.Classes, domain.ClassMouse)
-	}
-	if keys[native.BTN_GAMEPAD] {
-		info.Classes = append(info.Classes, domain.ClassGamepad)
-	} else if keys[native.BTN_JOYSTICK] {
-		info.Classes = append(info.Classes, domain.ClassJoystick)
-	}
-	if len(info.Classes) == 0 {
-		info.Classes = []domain.DeviceClass{domain.ClassOther}
-	}
-	return info, caps, details, nil
+
+	description.info.Classes = deviceClasses(keys)
 }
 
-func controlFor(
-	eventType native.EvType,
-	code native.EvCode,
-	abs map[native.EvCode]native.AbsInfo,
-) domain.Control {
-	control := domain.Control{
-		Kind:    domain.ControlUnknown,
-		Mapping: domain.MappingUnknown,
-		Mode:    domain.AxisUnknown,
-		Unit:    domain.UnitUnknown,
-		Usage:   domain.UsageUnknown,
-		ID:      domain.ControlID(fmt.Sprintf("evdev:%d:%d", eventType, code)),
-		Name:    native.CodeName(eventType, code),
-		Support: domain.SupportSupported,
+func describeEventType(
+	endpoint *device,
+	description *description,
+	request *eventTypeRequest,
+) {
+	if request.eventType == native.EV_REP {
+		description.caps.Repeat = domain.SupportSupported
 	}
-	switch eventType {
-	case native.EV_KEY:
-		control.Kind, control.Unit, control.Range = domain.ControlKey, domain.UnitBoolean, &domain.Range{
-			Min: 0,
-			Max: 1,
-		}
-		if strings.HasPrefix(control.Name, "BTN_") {
-			control.Kind = domain.ControlButton
-		}
-		control.Usage = keyUsage(code)
-	case native.EV_REL:
-		control.Kind, control.Mode, control.Unit = domain.ControlAxis, domain.AxisRelative, domain.UnitCounts
-		control.Usage = axisUsage(code, true)
-		if code == native.REL_WHEEL || code == native.REL_HWHEEL ||
-			code == native.REL_WHEEL_HI_RES ||
-			code == native.REL_HWHEEL_HI_RES {
-			control.Unit = domain.UnitDetents
-		}
-	case native.EV_ABS:
-		control.Kind, control.Mode, control.Unit = domain.ControlAxis, domain.AxisAbsolute, domain.UnitLogical
-		control.Usage = axisUsage(code, false)
-		if axis, ok := abs[code]; ok {
-			control.Range = &domain.Range{Min: int64(axis.Minimum), Max: int64(axis.Maximum)}
-		}
-	case native.EV_SW:
-		control.Kind, control.Unit, control.Range = domain.ControlSwitch, domain.UnitBoolean, &domain.Range{
-			Min: 0,
-			Max: 1,
-		}
-	default:
-		control.Kind, control.Support = domain.ControlUnknown, domain.SupportUnsupported
+
+	if !supportedEventType(request.eventType) {
+		return
 	}
-	if control.Usage != 0 {
+
+	codes := endpoint.capableEvents(request.eventType)
+	for idx := range codes {
+		if request.eventType == native.EV_KEY {
+			request.keys[codes[idx]] = true
+		}
+
+		appendControl(description, request.eventType, codes[idx])
+	}
+}
+
+func supportedEventType(eventType native.EvType) bool {
+	return slices.Contains([]native.EvType{
+		native.EV_KEY, native.EV_REL, native.EV_ABS,
+		native.EV_SW, native.EV_MSC, native.EV_FF_STATUS,
+	}, eventType)
+}
+
+func appendControl(description *description, eventType native.EvType, code native.EvCode) {
+	axes := nativeAxes(description.native.Axes)
+	control := controlFor(&controlRequest{eventType: eventType, code: code, axes: axes})
+
+	description.caps.Controls = append(description.caps.Controls, *control)
+	description.native.Controls = append(
+		description.native.Controls,
+		extension.NativeControl{
+			ID:   string(control.ID),
+			Type: uint16(eventType),
+			Code: uint16(code),
+		},
+	)
+}
+
+func nativeAxes(axes map[uint16]extension.AxisInfo) map[native.EvCode]native.AbsInfo {
+	result := make(map[native.EvCode]native.AbsInfo, len(axes))
+	for code := range axes {
+		axis := axes[code]
+
+		result[native.EvCode(code)] = native.AbsInfo{
+			Value: axis.Value, Minimum: axis.Minimum, Maximum: axis.Maximum,
+			Fuzz: axis.Fuzz, Flat: axis.Flat, Resolution: axis.Resolution,
+		}
+	}
+
+	return result
+}
+
+func deviceClasses(keys map[native.EvCode]bool) []domain.DeviceClass {
+	var classes []domain.DeviceClass
+
+	if keyboardClass(keys) {
+		classes = append(classes, domain.ClassKeyboard)
+	}
+
+	if keys[native.BTN_LEFT] {
+		classes = append(classes, domain.ClassMouse)
+	}
+
+	classes = appendGameClass(classes, keys)
+	if len(classes) == nativeZero {
+		return []domain.DeviceClass{domain.ClassOther}
+	}
+
+	return classes
+}
+
+func appendGameClass(
+	classes []domain.DeviceClass,
+	keys map[native.EvCode]bool,
+) []domain.DeviceClass {
+	if keys[native.BTN_GAMEPAD] {
+		return append(classes, domain.ClassGamepad)
+	}
+
+	if keys[native.BTN_JOYSTICK] {
+		return append(classes, domain.ClassJoystick)
+	}
+
+	return classes
+}
+
+func controlFor(request *controlRequest) *domain.Control {
+	control := unknownControl()
+
+	control.ID = domain.ControlID(fmt.Sprintf("evdev:%d:%d", request.eventType, request.code))
+	control.Name, control.Support = native.CodeName(
+		request.eventType,
+		request.code,
+	), domain.SupportSupported
+	configureControl(control, request)
+
+	if control.Usage != domain.UsageUnknown {
 		control.Mapping = domain.MappingInferred
 	}
+
 	return control
 }
 
+func configureControl(control *domain.Control, request *controlRequest) {
+	configure := map[native.EvType]func(*domain.Control, *controlRequest){
+		native.EV_KEY: configureKey, native.EV_REL: configureRelative,
+		native.EV_ABS: configureAbsolute, native.EV_SW: configureSwitch,
+	}
+	function, ok := configure[request.eventType]
+
+	if !ok {
+		control.Support = domain.SupportUnsupported
+
+		return
+	}
+
+	function(control, request)
+}
+
+func configureKey(control *domain.Control, request *controlRequest) {
+	control.Kind, control.Unit, control.Range = domain.ControlKey, domain.UnitBoolean, booleanRange()
+	if strings.HasPrefix(control.Name, "BTN_") {
+		control.Kind = domain.ControlButton
+	}
+
+	control.Usage = keyUsage(request.code)
+}
+
+func booleanRange() *domain.Range { return &domain.Range{Min: nativeZero, Max: nativeOne} }
+
+func configureRelative(control *domain.Control, request *controlRequest) {
+	control.Kind, control.Mode, control.Unit = domain.ControlAxis, domain.AxisRelative, domain.UnitCounts
+	control.Usage = relativeAxisUsage(request.code)
+
+	if isWheel(request.code) {
+		control.Unit = domain.UnitDetents
+	}
+}
+
+func isWheel(code native.EvCode) bool {
+	return slices.Contains([]native.EvCode{
+		native.REL_WHEEL, native.REL_HWHEEL,
+		native.REL_WHEEL_HI_RES, native.REL_HWHEEL_HI_RES,
+	}, code)
+}
+
+func configureAbsolute(control *domain.Control, request *controlRequest) {
+	control.Kind, control.Mode, control.Unit = domain.ControlAxis, domain.AxisAbsolute, domain.UnitLogical
+	control.Usage = absoluteAxisUsage(request.code)
+
+	axis, ok := request.axes[request.code]
+
+	if ok {
+		control.Range = &domain.Range{Min: int64(axis.Minimum), Max: int64(axis.Maximum)}
+	}
+}
+
+func configureSwitch(control *domain.Control, _ *controlRequest) {
+	control.Kind, control.Unit, control.Range = domain.ControlSwitch, domain.UnitBoolean, booleanRange()
+}
+
 func transport(bus uint16) domain.Transport {
-	switch bus {
-	case 0x03:
-		return domain.TransportUSB
-	case 0x05:
-		return domain.TransportBluetooth
-	case 0x06:
-		return domain.TransportVirtual
-	case 0x11:
-		return domain.TransportPS2
-	case 0x18:
-		return domain.TransportI2C
-	default:
+	transports := map[uint16]domain.Transport{
+		nativeThree:      domain.TransportUSB,
+		nativeFive:       domain.TransportBluetooth,
+		nativeSix:        domain.TransportVirtual,
+		nativeSeventeen:  domain.TransportPS2,
+		nativeTwentyFour: domain.TransportI2C,
+	}
+
+	value, ok := transports[bus]
+	if !ok {
 		return domain.TransportUnknown
 	}
+
+	return value
 }
 
 func transient(err error) bool {
 	return errors.Is(err, syscall.EINTR) || errors.Is(err, syscall.EAGAIN)
 }
 
-func operationError(op string, id domain.DeviceID, err error) error {
-	var kind error
-	switch {
-	case errors.Is(err, os.ErrPermission):
-		kind = domain.ErrPermissionDenied
-	case errors.Is(err, os.ErrNotExist):
-		kind = domain.ErrNotFound
-	case errors.Is(err, syscall.ENODEV), errors.Is(err, syscall.ENXIO), errors.Is(err, io.EOF):
-		kind = domain.ErrDisconnected
-	case errors.Is(err, os.ErrClosed):
-		kind = domain.ErrClosed
-	}
-	if kind != nil {
-		err = errors.Join(kind, err)
-	}
-	return &domain.OpError{Op: op, DeviceID: id, Err: err}
+func operationError(operation string, id domain.DeviceID, err error) error {
+	return &domain.OpError{Op: operation, DeviceID: id, Err: errors.Join(errorKind(err), err)}
 }
 
-func axisUsage(code native.EvCode, relative bool) domain.Usage {
-	if relative {
-		switch code {
-		case native.REL_X, native.REL_Y, native.REL_Z, native.REL_RX, native.REL_RY, native.REL_RZ:
-			return domain.HID(desktopPage, 0x30+uint16(code))
-		case native.REL_DIAL:
-			return domain.HID(desktopPage, 0x37)
-		case native.REL_WHEEL, native.REL_WHEEL_HI_RES:
-			return domain.HID(desktopPage, 0x38)
-		case native.REL_HWHEEL, native.REL_HWHEEL_HI_RES:
-			return domain.HID(consumerPage, 0x238)
+func errorKind(err error) error {
+	kinds := []error{
+		domain.ErrPermissionDenied,
+		domain.ErrNotFound,
+		domain.ErrDisconnected,
+		domain.ErrClosed,
+	}
+	conditions := []bool{
+		errors.Is(err, os.ErrPermission),
+		errors.Is(err, os.ErrNotExist),
+		disconnected(err),
+		errors.Is(err, os.ErrClosed),
+	}
+
+	for idx := range conditions {
+		if conditions[idx] {
+			return kinds[idx]
 		}
-		return 0
 	}
-	switch code {
-	case native.ABS_X, native.ABS_Y, native.ABS_Z, native.ABS_RX, native.ABS_RY, native.ABS_RZ:
-		return domain.HID(desktopPage, 0x30+uint16(code))
-	case native.ABS_THROTTLE:
-		return domain.HID(0x02, 0xbb)
-	case native.ABS_RUDDER:
-		return domain.HID(0x02, 0xba)
-	case native.ABS_WHEEL:
-		// Evdev merges Generic Desktop Wheel and simulation steering controls.
-		// Prefer the common Wheel identity without claiming an original collection.
-		return domain.HID(desktopPage, 0x38)
-	case native.ABS_GAS:
-		return domain.HID(0x02, 0xc4)
-	case native.ABS_BRAKE:
-		return domain.HID(0x02, 0xc5)
+
+	return nil
+}
+
+func disconnected(err error) bool {
+	return errors.Is(err, syscall.ENODEV) || errors.Is(err, syscall.ENXIO) || errors.Is(err, io.EOF)
+}
+
+func relativeAxisUsage(code native.EvCode) domain.Usage {
+	if code <= native.REL_RZ {
+		return domain.HID(nativeOne, axisUsageBase+uint16(code))
 	}
-	return 0
+
+	return relativeUsage(code)
+}
+
+func absoluteAxisUsage(code native.EvCode) domain.Usage {
+	if code <= native.ABS_RZ {
+		return domain.HID(nativeOne, axisUsageBase+uint16(code))
+	}
+
+	return absoluteUsage(code)
+}
+
+func relativeUsage(code native.EvCode) domain.Usage {
+	return usageFromTable(code, relativeUsageTable())
+}
+
+func relativeUsageTable() map[native.EvCode]domain.Usage {
+	return map[native.EvCode]domain.Usage{
+		native.REL_DIAL:          domain.HID(nativeOne, dialUsage),
+		native.REL_WHEEL:         domain.HID(nativeOne, wheelUsage),
+		native.REL_WHEEL_HI_RES:  domain.HID(nativeOne, wheelUsage),
+		native.REL_HWHEEL:        domain.HID(nativeTwelve, horizontalWheelUsage),
+		native.REL_HWHEEL_HI_RES: domain.HID(nativeTwelve, horizontalWheelUsage),
+	}
+}
+
+func absoluteUsage(code native.EvCode) domain.Usage {
+	if code == native.ABS_WHEEL {
+		return domain.HID(nativeOne, wheelUsage)
+	}
+
+	return hidUsage(nativeTwo, map[native.EvCode]uint16{
+		native.ABS_THROTTLE: throttleUsage, native.ABS_RUDDER: rudderUsage,
+		native.ABS_GAS: gasUsage, native.ABS_BRAKE: brakeUsage,
+	}[code])
+}
+
+func usageFromTable(code native.EvCode, table map[native.EvCode]domain.Usage) domain.Usage {
+	return table[code]
+}
+
+func hidUsage(page, usage uint16) domain.Usage {
+	if usage == nativeZero {
+		return domain.UsageUnknown
+	}
+
+	return domain.HID(page, usage)
 }
 
 func keyUsage(code native.EvCode) domain.Usage {
-	if usage, ok := keyboardUsages[code]; ok {
-		return domain.HID(keyboardPage, usage)
-	}
-	if usage, ok := consumerUsages[code]; ok {
-		return domain.HID(consumerPage, usage)
-	}
-	switch code {
-	case native.KEY_POWER:
-		return domain.HID(desktopPage, 0x81)
-	case native.KEY_SLEEP:
-		return domain.HID(desktopPage, 0x82)
-	case native.KEY_WAKEUP:
-		return domain.HID(desktopPage, 0x83)
-	case native.BTN_DPAD_UP:
-		return domain.HID(desktopPage, 0x90)
-	case native.BTN_DPAD_DOWN:
-		return domain.HID(desktopPage, 0x91)
-	case native.BTN_DPAD_RIGHT:
-		return domain.HID(desktopPage, 0x92)
-	case native.BTN_DPAD_LEFT:
-		return domain.HID(desktopPage, 0x93)
-	case native.BTN_START:
-		return domain.HID(desktopPage, 0x3d)
-	case native.BTN_SELECT:
-		return domain.HID(desktopPage, 0x3e)
-	}
-	for _, limits := range [][2]native.EvCode{{native.BTN_0, native.BTN_9}, {native.BTN_LEFT, native.BTN_TASK}, {native.BTN_TRIGGER, native.BTN_DEAD}, {native.BTN_SOUTH, native.BTN_THUMBR}} {
-		if code >= limits[0] && code <= limits[1] {
-			return domain.HID(buttonPage, uint16(code-limits[0])+1)
+	lookups := []usageLookup{keyboardUsage, consumerUsage, desktopKeyUsage, buttonUsage}
+	for idx := range lookups {
+		usage := lookups[idx](code)
+		if usage != domain.UsageUnknown {
+			return usage
 		}
 	}
-	return 0
+
+	return domain.UsageUnknown
 }
 
-// Factory returns the native backend constructor.
-func Factory() ports.Factory { return newBackend }
+func desktopKeyUsage(code native.EvCode) domain.Usage {
+	usages := map[native.EvCode]uint16{
+		native.KEY_POWER: usage81, native.KEY_SLEEP: usage82, native.KEY_WAKEUP: usage83,
+		native.BTN_DPAD_UP: usage90, native.BTN_DPAD_DOWN: usage91, native.BTN_DPAD_RIGHT: usage92,
+		native.BTN_DPAD_LEFT: usage93, native.BTN_START: usage3D, native.BTN_SELECT: usage3E,
+	}
+
+	return hidUsage(nativeOne, usages[code])
+}
+
+func buttonRanges() []codeRange {
+	return []codeRange{
+		{first: native.BTN_0, last: native.BTN_9},
+		{first: native.BTN_LEFT, last: native.BTN_TASK},
+		{first: native.BTN_TRIGGER, last: native.BTN_DEAD},
+		{first: native.BTN_SOUTH, last: native.BTN_THUMBR},
+	}
+}
+
+func buttonUsage(code native.EvCode) domain.Usage {
+	ranges := buttonRanges()
+	for idx := range ranges {
+		limits := &ranges[idx]
+		if code >= limits.first && code <= limits.last {
+			return domain.HID(nativeNine, uint16(code-limits.first)+nativeOne)
+		}
+	}
+
+	return domain.UsageUnknown
+}
+
+func unknownControl() *domain.Control {
+	control := new(domain.Control)
+
+	control.Kind, control.Mapping, control.Mode = domain.ControlUnknown, domain.MappingUnknown, domain.AxisUnknown
+	control.Unit, control.Usage = domain.UnitUnknown, domain.UsageUnknown
+
+	return control
+}
+
+func captureView(state *capture) *captureview.Operations[domain.DeviceInfo, domain.Capabilities] {
+	view := new(captureview.Operations[domain.DeviceInfo, domain.Capabilities])
+
+	view.Operations.Info = func() domain.DeviceInfo { return captureInfo(state) }
+	view.Operations.Capabilities = func() domain.Capabilities { return captureCapabilities(state) }
+	view.Operations.Extension = func(target any) bool { return captureExtension(state, target) }
+	view.Operations.Close = func() error { return captureClose(state) }
+
+	return view
+}
+
+// NativeInfo returns a fresh snapshot of native metadata.
+func (view metadataView[T]) NativeInfo() T { return view() }
+
+func keyboardClass(keys map[native.EvCode]bool) bool {
+	return keys[native.KEY_A] || keys[native.KEY_ENTER] || keys[native.KEY_SPACE]
+}
+
+func hatAxisCode(idx int) native.EvCode {
+	codes := [nativeFour]native.EvCode{
+		native.ABS_HAT0X,
+		native.ABS_HAT1X,
+		native.ABS_HAT2X,
+		native.ABS_HAT3X,
+	}
+
+	return codes[idx]
+}
+
+func newHat(idx int, horizontal, vertical *extension.AxisInfo) *hat {
+	hat := new(hat)
+
+	hat.id, hat.x, hat.y = domain.ControlID(
+		fmt.Sprintf("evdev:hat:%d", idx),
+	), horizontal.Value, vertical.Value
+	hat.last = hatValue(hat.x, hat.y)
+
+	return hat
+}
+
+func setDevicePath(description *description, path string) {
+	description.info.ID, description.info.Path, description.info.Transport = deviceID(
+		path,
+	), path, domain.TransportUnknown
+}
+
+func setProperties(description *description, properties []native.EvProp) {
+	for idx := range properties {
+		description.native.Properties = append(
+			description.native.Properties,
+			uint16(properties[idx]),
+		)
+	}
+}
+
+func backendUnregister(owner *backend, capture *capture) {
+	owner.mu.Lock()
+	delete(owner.captures, capture)
+	owner.mu.Unlock()
+}
+
+func configureBackendOpen(view *backendOperations, state *backend) {
+	view.Operations.Open = func(ctx context.Context, id domain.DeviceID, sink ports.EventSink) (ports.Capture, error) {
+		capture, err := backendOpen(ctx, state, &openRequest{id: id, sink: sink})
+		if err != nil {
+			return nil, errors.Join(err)
+		}
+
+		return captureView(capture), nil
+	}
+}
+
+func configureCapture(capture *capture, description *description) {
+	capture.info, capture.caps, capture.native = description.info, description.caps, description.native
+	capturePrepare(capture)
+}

@@ -32,9 +32,12 @@ type (
 
 	// Element describes the native element behind a common control. ControlID is
 	// the string representation of the public device-local ControlID.
-	Element struct {
+	Element ElementRecord[string]
+
+	// ElementRecord retains native element properties with a caller-defined control identifier.
+	ElementRecord[ID ~string] struct {
 		// ControlID identifies the corresponding common control.
-		ControlID string
+		ControlID ID
 		// Cookie identifies the element within its IOHID device.
 		Cookie uint32
 		// ReportID selects the HID report containing the element.
