@@ -15,226 +15,831 @@ import (
 	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/ui/input"
 	ext "github.com/gostafa/goinput/extensions/win32"
 	"github.com/gostafa/goinput/internal/domain"
+	captureview "github.com/gostafa/goinput/internal/ports/capture"
 )
 
-func testNativeCapabilities(t *testing.T) {
-	fixture := newNativeFixture(t)
-	keyboard := fixture.capture(t, 1)
-	nativeOK(t, captureLoadCapabilities(t.Context(), keyboard))
-	assertCoreEqual(t, keyboard.caps.Repeat, domain.SupportSupported)
-	if len(keyboard.caps.Controls) < keyboardScanCount {
-		t.Fatal("missing keyboard controls")
+type (
+	testNativeCapabilitiesState struct {
+		ctx          func() context.Context
+		fixture      *nativeFixture
+		keyboard     *capture
+		mouse        *capture
+		subscription *capture
+		cancel       context.CancelFunc
+		button       hid.HIDP_BUTTON_CAPS
+		axis         hid.HIDP_VALUE_CAPS
 	}
-	keyboard.native.Controls = append(keyboard.native.Controls, keyboard.native.Controls[0])
-	sortKeyboardControls(keyboard)
-	mouse := fixture.capture(t, 0)
-	mouse.device.buttons, mouse.device.hwheel = 3, true
-	nativeOK(t, captureLoadCapabilities(t.Context(), mouse))
-	assertCoreEqual(t, len(mouse.caps.Controls), 11)
-	assertCoreEqual(t, mouse.caps.Controls[0].Support, domain.SupportSupported)
-	assertCoreEqual(t, mouse.caps.Controls[4].Support, domain.SupportUnknown)
-	assertCoreEqual(t, mouse.caps.Controls[10].Support, domain.SupportSupported)
+	assertCapabilityBoundsState struct {
+		values  []byte
+		err     error
+		builder *hidBuilder
+		control hidControl
+	}
+	assertHIDDescriptorsState struct {
+		ctrl  hidControl
+		value hid.HIDP_VALUE_CAPS
+	}
+	assertCaptureViewsState struct {
+		metadata ext.Metadata
+		ctx      func() context.Context
+		err      error
+		view     *captureview.Operations[
+			domain.DeviceInfo,
+			domain.Capabilities,
+		]
+		cancel context.CancelFunc
+		result *capture
+		caps   domain.Capabilities
+		info   ext.Info
+	}
+	assertHIDDescriptorsStep6ArgsRecord[
+		ButtonValue any,
+		StateValue any,
+	] struct {
+		state StateValue
+	}
+	assertHIDDescriptorsStep6Args = assertHIDDescriptorsStep6ArgsRecord[
+		*hid.HIDP_BUTTON_CAPS,
+		*assertHIDDescriptorsState,
+	]
+	assertCaptureViewsStep1ArgsRecord[
+		SubscriptionValue any,
+		ApiValue any,
+		StateValue any,
+	] struct {
+		subscription SubscriptionValue
+		api          ApiValue
+		state        StateValue
+	}
+	assertCaptureViewsStep1Args = assertCaptureViewsStep1ArgsRecord[
+		*capture,
+		*nativeAPI,
+		*assertCaptureViewsState,
+	]
+	assertCaptureViewsStep9ArgsRecord[
+		SubscriptionValue any,
+		ApiValue any,
+		StateValue any,
+	] struct {
+		subscription SubscriptionValue
+		state        StateValue
+	}
+	assertCaptureViewsStep9Args = assertCaptureViewsStep9ArgsRecord[
+		*capture,
+		*nativeAPI,
+		*assertCaptureViewsState,
+	]
+	trimmedCase struct {
+		err  error
+		size uint32
+	}
+)
+
+func assertCapabilityBounds(t *testing.T) {
+	t.Helper()
+
+	state := new(assertCapabilityBoundsState)
+	assertCapabilityBoundsStep1(t, state)
+}
+
+func assertCapabilityBoundsStep1(t *testing.T, state *assertCapabilityBoundsState) {
+	t.Helper()
+
+	state.values, state.err = readCapabilities(noValue, func(*byte, *uint16) foundation.NTSTATUS {
+		t.Fatal("zero count called driver")
+
+		return noValue
+	})
+	nativeOK(t, state.err)
+	assertCapabilityBoundsStep2(t, state)
+}
+
+func assertCapabilityBoundsStep2(t *testing.T, state *assertCapabilityBoundsState) {
+	t.Helper()
+	assertCoreEqual(t, len(state.values), noValue)
 	assertCoreError(
 		t,
-		captureLoadCapabilities(t.Context(), fixture.capture(t, 3)),
+		resultError(readCapabilities(singleValue, func(*byte, *uint16) foundation.NTSTATUS {
+			return noValue
+		})),
 		domain.ErrUnsupported,
 	)
+	assertCapabilityBoundsStep2Continue(t, state)
+}
 
-	subscription := fixture.capture(t, 2)
-	button := hid.HIDP_BUTTON_CAPS{UsagePage: 9, ReportID: 1, IsAbsolute: 1}
-	button.Anonymous.Data[0], button.Anonymous.Data[6] = 1, 1
-	axis := hid.HIDP_VALUE_CAPS{
-		UsagePage:   1,
-		ReportID:    1,
-		BitSize:     8,
-		ReportCount: 1,
-		IsAbsolute:  1,
-		LogicalMax:  255,
-	}
-	axis.Anonymous.Data[0], axis.Anonymous.Data[6] = 48, 2
-	fixture.buttons, fixture.values = []hid.HIDP_BUTTON_CAPS{button}, []hid.HIDP_VALUE_CAPS{axis}
-	fixture.caps.NumberInputButtonCaps, fixture.caps.NumberInputValueCaps = 1, 1
-	nativeOK(t, captureLoadCapabilities(t.Context(), subscription))
-	assertCoreEqual(t, subscription.caps.Complete, true)
-	assertCoreEqual(t, len(subscription.caps.Controls), 2)
-	assertCoreEqual(t, len(subscription.native.Controls), 2)
-	assertCoreEqual(t, subscription.hid.reportIDs[1], true)
+func assertCapabilityBoundsStep3(t *testing.T, state *assertCapabilityBoundsState) {
+	t.Helper()
 
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	assertCoreError(t, captureLoadHIDCapabilities(ctx, subscription), context.Canceled)
-	fixture.err = domain.ErrUnsupported
-	assertCoreError(t, captureLoadHIDCapabilities(t.Context(), subscription), domain.ErrUnsupported)
-	fixture.err = nil
-	fixture.status = 0
-	assertCoreError(t, captureBuildHIDCapabilities(subscription, []byte{1}), domain.ErrUnsupported)
-	fixture.status = hid.HIDP_STATUS_SUCCESS
-	fixture.maxData = maxDevices + 1
-	_, err := makeHIDBuilder([]byte{1})
-	assertCoreError(t, err, domain.ErrUnsupported)
-	fixture.maxData = 4
-	fixture.caps.InputReportByteLength = 0
-	_, err = makeHIDBuilder([]byte{1})
-	assertCoreError(t, err, domain.ErrUnsupported)
-	fixture.caps.InputReportByteLength = 2
-	fixture.buttons[0].IsRange = 1
-	fixture.buttons[0].Anonymous.Data[0], fixture.buttons[0].Anonymous.Data[1] = 2, 1
-	assertCoreError(t, captureBuildHIDCapabilities(subscription, []byte{1}), domain.ErrUnsupported)
-	fixture.buttons[0] = button
-	fixture.values[0].IsRange = 1
-	fixture.values[0].Anonymous.Data[0], fixture.values[0].Anonymous.Data[1] = 2, 1
-	assertCoreError(t, captureBuildHIDCapabilities(subscription, []byte{1}), domain.ErrUnsupported)
-	fixture.values[0] = axis
+	state.values, state.err = readCapabilities(
+		singleValue,
+		func(first *byte, _ *uint16) foundation.NTSTATUS {
+			*first = testAxisValue
 
-	fixture.err = domain.ErrUnsupported
-	_, err = captureReadPreparsedData(subscription)
-	assertCoreError(t, err, domain.ErrUnsupported)
-	_, err = captureReadPreparsedBuffer(subscription, 1)
-	assertCoreError(t, err, domain.ErrUnsupported)
-	fixture.err = nil
-	replaceNative(
-		t,
-		&winGetRawInputDeviceInfo,
-		func(_ foundation.HANDLE, _ input.RAW_INPUT_DEVICE_INFO_COMMAND, _ unsafe.Pointer, count *uint32) (uint32, error) {
-			*count = 0
-			return 0, nil
+			return hid.HIDP_STATUS_SUCCESS
 		},
 	)
-	_, err = captureReadPreparsedData(subscription)
-	assertCoreError(t, err, domain.ErrUnsupported)
-	assertTrimmed(t)
-	assertCapabilityBounds(t)
-	assertHIDDescriptors(t, &axis, &button)
-	assertCaptureViews(t, fixture, keyboard)
+	nativeOK(t, state.err)
+	nativeEqual(t, state.values, []byte{testAxisValue})
+	assertCapabilityBoundsStep4(t, state)
+}
+
+func assertCapabilityBoundsStep4(t *testing.T, state *assertCapabilityBoundsState) {
+	t.Helper()
+	assertCoreError(t, addCapabilities([]byte{singleValue}, func(*byte) error {
+		return domain.ErrUnsupported
+	}), domain.ErrUnsupported)
+
+	state.builder = nativeNew[hidBuilder](func(value *hidBuilder) {
+		value.descriptor = nativeNew[descriptor](func(value *descriptor) {
+			value.controls = make(map[hidIndex]hidControl)
+			value.reportIDs = make(map[byte]bool)
+		})
+	})
+	assertCapabilityBoundsStep4Continue(t, state)
+}
+
+func assertCapabilityBoundsStep5(t *testing.T, state *assertCapabilityBoundsState) {
+	t.Helper()
+	hidBuilderAdd(state.builder, &state.control)
+	hidBuilderAdd(state.builder, &state.control)
+	assertCoreEqual(t, len(state.builder.controls), singleValue)
+	assertCapabilityBoundsStep6(t, state)
+}
+
+func assertCapabilityBoundsStep6(t *testing.T, state *assertCapabilityBoundsState) {
+	t.Helper()
+	addCapabilityRange(state.builder, nativeNew[capabilityRange](func(value *capabilityRange) {
+		value.firstUsage = secondValue
+		value.lastUsage = singleValue
+	}), func(uint32, uint32) hidControl {
+		t.Fatal("reversed span iterated")
+
+		return nativeZero[hidControl]()
+	})
+	nativeOK(
+		t,
+		addNativeCapability(
+			state.builder,
+			nativeNew[nativeCapability](func(value *nativeCapability) {
+				value.alias = singleValue
+			}),
+		),
+	)
+}
+
+func assertCaptureViews(t *testing.T, fixture *nativeFixture, args *prepareCaptureArgs) {
+	t.Helper()
+
+	state := new(assertCaptureViewsState)
+	assertCaptureViewsStep1(
+		t,
+		fixture,
+		&assertCaptureViewsStep1Args{subscription: args.subscription, api: args.api, state: state},
+	)
+}
+
+func assertCaptureViewsStep1(
+	t *testing.T,
+	fixture *nativeFixture,
+	args *assertCaptureViewsStep1Args,
+) {
+	t.Helper()
+
+	args.state.view = makeCaptureView(t.Context(), args.subscription)
+	nativeEqual(t, args.state.view.Info(), args.subscription.info)
+	assertCaptureViewsStep2(t, fixture, args)
+}
+
+func assertCaptureViewsStep10(t *testing.T, subscription *capture, state *assertCaptureViewsState) {
+	t.Helper()
+	nativeOK(t, state.err)
+	assertCoreEqual(t, state.result, subscription)
+}
+
+func assertCaptureViewsStep2(
+	t *testing.T,
+	fixture *nativeFixture,
+	args *assertCaptureViewsStep1Args,
+) {
+	t.Helper()
+
+	args.state.caps = args.state.view.Capabilities()
+	args.state.caps.Controls[noValue].Name = testChangedText
+	assertCaptureViewsStep2Continue(t, fixture, args)
+}
+
+func assertCaptureViewsStep3(
+	t *testing.T,
+	fixture *nativeFixture,
+	args *assertCaptureViewsStep1Args,
+) {
+	t.Helper()
+	assertCoreEqual(t, args.state.view.Extension(&args.state.info), true)
+
+	args.state.info.Controls[noValue].ID = testChangedText
+	assertCaptureViewsStep3Continue(t, fixture, args)
+}
+
+func assertCaptureViewsStep4(
+	t *testing.T,
+	fixture *nativeFixture,
+	args *assertCaptureViewsStep1Args,
+) {
+	t.Helper()
+	assertCoreEqual(t, args.state.view.Extension(&args.state.metadata), true)
+	nativeEqual(t, args.state.metadata.NativeInfo(), args.subscription.native)
+	assertCoreEqual(t, args.state.view.Extension(new(string)), false)
+	assertCaptureViewsStep5(t, fixture, args)
+}
+
+func assertCaptureViewsStep5(
+	t *testing.T,
+	fixture *nativeFixture,
+	args *assertCaptureViewsStep1Args,
+) {
+	t.Helper()
+	assertCoreEqual(t, args.state.view.Extension((*ext.Info)(nil)), false)
+	assertCoreEqual(t, args.state.view.Extension((*ext.Metadata)(nil)), false)
+	nativeOK(t, args.state.view.Close())
+	assertCaptureViewsStep6(t, fixture, args)
+}
+
+func assertCaptureViewsStep6(
+	t *testing.T,
+	fixture *nativeFixture,
+	args *assertCaptureViewsStep1Args,
+) {
+	t.Helper()
+	assertCoreEqual(t, args.subscription.closed.Load(), true)
+	nativeOK(t, args.state.view.Close())
+
+	args.subscription = fixture.capture(t, noValue, args.api)
+	assertCaptureViewsStep7(t, fixture, args)
+}
+
+func assertCaptureViewsStep7(
+	t *testing.T,
+	fixture *nativeFixture,
+	args *assertCaptureViewsStep1Args,
+) {
+	t.Helper()
+
+	args.subscription.backend.call = func(context.Context, func() error) error {
+		return domain.ErrClosed
+	}
+	nativeOK(t, captureClose(t.Context(), args.subscription))
+
+	args.subscription = fixture.capture(t, noValue, args.api)
+	assertCaptureViewsStep8(
+		t,
+		&assertCaptureViewsStep9Args{subscription: args.subscription, state: args.state},
+	)
+}
+
+func assertCaptureViewsStep8(t *testing.T, args *assertCaptureViewsStep9Args) {
+	t.Helper()
+
+	args.subscription.backend.call = func(context.Context, func() error) error {
+		return domain.ErrPermissionDenied
+	}
+	assertCoreError(t, captureClose(t.Context(), args.subscription), domain.ErrPermissionDenied)
+
+	args.state.ctx, args.state.cancel = nativeCancel(t.Context())
+	assertCaptureViewsStep9(t, args)
+}
+
+func assertCaptureViewsStep9(t *testing.T, args *assertCaptureViewsStep9Args) {
+	t.Helper()
+	args.state.cancel()
+	assertCoreError(
+		t,
+		resultError(captureCheckOpened(args.state.ctx(), args.subscription)),
+		context.Canceled,
+	)
+
+	args.state.result, args.state.err = captureCheckOpened(t.Context(), args.subscription)
+	assertCaptureViewsStep10(t, args.subscription, args.state)
+}
+
+func assertHIDDescriptors(t *testing.T, axis *hid.HIDP_VALUE_CAPS) {
+	t.Helper()
+
+	state := new(assertHIDDescriptorsState)
+	assertHIDDescriptorsStep1(t, axis, &assertHIDDescriptorsStep6Args{state: state})
+}
+
+func assertHIDDescriptorsStep1(
+	t *testing.T,
+	axis *hid.HIDP_VALUE_CAPS,
+	args *assertHIDDescriptorsStep6Args,
+) {
+	t.Helper()
+	assertCoreEqual(t, buttonKind(seventhValue), domain.ControlKey)
+	assertCoreEqual(t, buttonKind(twelfthValue), domain.ControlKey)
+	assertHIDDescriptorsStep2(t, axis, args)
+}
+
+func assertHIDDescriptorsStep10(t *testing.T, args *assertHIDDescriptorsStep6Args) {
+	t.Helper()
+
+	args.state.value.PhysicalMax = singleValue
+	assertCoreEqual(t, conventionalHat(&args.state.value, noValue, seventhValue), false)
+
+	args.state.value.Units = singleValue
+	assertHIDDescriptorsStep11(t, args.state)
+}
+
+func assertHIDDescriptorsStep11(t *testing.T, state *assertHIDDescriptorsState) {
+	t.Helper()
+	assertCoreEqual(t, conventionalHat(&state.value, noValue, seventhValue), false)
+}
+
+func assertHIDDescriptorsStep2(
+	t *testing.T,
+	axis *hid.HIDP_VALUE_CAPS,
+	args *assertHIDDescriptorsStep6Args,
+) {
+	t.Helper()
+	assertCoreEqual(t, buttonKind(testButtonPage), domain.ControlButton)
+	assertCoreEqual(t, buttonSupport(noValue), domain.SupportUnsupported)
+	assertCoreEqual(t, buttonSupport(singleValue), domain.SupportSupported)
+	assertHIDDescriptorsStep3(t, axis, args)
+}
+
+func assertHIDDescriptorsStep3(
+	t *testing.T,
+	axis *hid.HIDP_VALUE_CAPS,
+	args *assertHIDDescriptorsStep6Args,
+) {
+	t.Helper()
+
+	args.state.value = *axis
+	args.state.value.IsAbsolute = noValue
+	args.state.ctrl = makeHIDValue(&args.state.value, testAxisUsage, secondValue)
+	assertHIDDescriptorsStep4(t, axis, args)
+}
+
+func assertHIDDescriptorsStep4(
+	t *testing.T,
+	axis *hid.HIDP_VALUE_CAPS,
+	args *assertHIDDescriptorsStep6Args,
+) {
+	t.Helper()
+	assertCoreEqual(t, args.state.ctrl.control.Mode, domain.AxisRelative)
+
+	args.state.value.BitSize = noValue
+	args.state.ctrl = makeHIDValue(&args.state.value, testAxisUsage, secondValue)
+	assertHIDDescriptorsStep5(t, axis, args)
+}
+
+func assertHIDDescriptorsStep5(
+	t *testing.T,
+	axis *hid.HIDP_VALUE_CAPS,
+	args *assertHIDDescriptorsStep6Args,
+) {
+	t.Helper()
+	assertCoreEqual(t, args.state.ctrl.control.Support, domain.SupportUnsupported)
+
+	args.state.value = *axis
+	args.state.value.LogicalMax = singleValue
+	assertHIDDescriptorsStep6(t, args)
+}
+
+func assertHIDDescriptorsStep6(t *testing.T, args *assertHIDDescriptorsStep6Args) {
+	t.Helper()
+
+	args.state.ctrl = makeHIDValue(&args.state.value, testAxisUsage, secondValue)
+	assertCoreEqual(t, args.state.ctrl.control.Kind, domain.ControlSwitch)
+
+	args.state.value.LogicalMax = seventhValue
+	assertHIDDescriptorsStep7(t, args)
+}
+
+func assertHIDDescriptorsStep7(t *testing.T, args *assertHIDDescriptorsStep6Args) {
+	t.Helper()
+
+	args.state.ctrl = makeHIDValue(&args.state.value, hatUsage, secondValue)
+	assertCoreEqual(t, args.state.ctrl.control.Kind, domain.ControlHat)
+	assertCoreEqual(t, args.state.ctrl.hat, true)
+	assertHIDDescriptorsStep8(t, args)
+}
+
+func assertHIDDescriptorsStep8(t *testing.T, args *assertHIDDescriptorsStep6Args) {
+	t.Helper()
+	assertCoreEqual(t, conventionalHat(&args.state.value, noValue, fifthValue), false)
+
+	args.state.value.Units = angularUnits
+	args.state.value.PhysicalMax = compassExtent
+	assertHIDDescriptorsStep9(t, args)
+}
+
+func assertHIDDescriptorsStep9(t *testing.T, args *assertHIDDescriptorsStep6Args) {
+	t.Helper()
+	assertCoreEqual(t, conventionalHat(&args.state.value, noValue, seventhValue), true)
+
+	args.state.value.PhysicalMax = cardinalExtent
+	assertCoreEqual(t, conventionalHat(&args.state.value, noValue, thirdValue), true)
+	assertHIDDescriptorsStep10(t, args)
 }
 
 func assertTrimmed(t *testing.T) {
 	t.Helper()
-	for _, test := range []struct {
-		size uint32
-		err  error
-	}{{0, domain.ErrUnsupported}, {2, domain.ErrEventLoss}, {1, nil}} {
-		data, err := trimPreparsedData([]byte{1}, test.size)
-		assertCoreError(t, err, test.err)
-		if test.err == nil {
-			nativeEqual(t, data, []byte{1})
-		}
+
+	cases := trimmedCases()
+	for index := range cases {
+		assertTrimmedCase(t, &cases[index])
 	}
 }
 
-func assertCapabilityBounds(t *testing.T) {
+func trimmedCases() []trimmedCase {
+	return []trimmedCase{
+		{size: noValue, err: domain.ErrUnsupported},
+		{size: secondValue, err: domain.ErrEventLoss},
+		{size: singleValue, err: nil},
+	}
+}
+
+func assertTrimmedCase(t *testing.T, test *trimmedCase) {
 	t.Helper()
-	values, err := readCapabilities(
-		0,
-		func(*byte, *uint16) foundation.NTSTATUS { t.Fatal("zero count called driver"); return 0 },
-	)
-	nativeOK(t, err)
-	assertCoreEqual(t, len(values), 0)
-	_, err = readCapabilities(1, func(*byte, *uint16) foundation.NTSTATUS { return 0 })
-	assertCoreError(t, err, domain.ErrUnsupported)
-	_, err = readCapabilities(
-		1,
-		func(_ *byte, count *uint16) foundation.NTSTATUS { *count = 2; return hid.HIDP_STATUS_SUCCESS },
-	)
-	assertCoreError(t, err, domain.ErrEventLoss)
-	values, err = readCapabilities(
-		1,
-		func(first *byte, _ *uint16) foundation.NTSTATUS { *first = 42; return hid.HIDP_STATUS_SUCCESS },
-	)
-	nativeOK(t, err)
-	nativeEqual(t, values, []byte{42})
+
+	data, err := trimPreparsedData([]byte{singleValue}, test.size)
+	assertCoreError(t, err, test.err)
+
+	if test.err == nil {
+		nativeEqual(t, data, []byte{singleValue})
+	}
+}
+
+func testNativeCapabilities(t *testing.T, api *nativeAPI) {
+	t.Helper()
+
+	state := new(testNativeCapabilitiesState)
+	testNativeCapabilitiesStep1(t, api, state)
+}
+
+func testNativeCapabilitiesStep1(t *testing.T, api *nativeAPI, state *testNativeCapabilitiesState) {
+	t.Helper()
+
+	state.fixture = newNativeFixture(t, api)
+	state.keyboard = state.fixture.capture(t, singleValue, api)
+	nativeOK(t, captureLoadCapabilities(t.Context(), state.keyboard, api))
+	testNativeCapabilitiesStep2(t, api, state)
+}
+
+func testNativeCapabilitiesStep10(
+	t *testing.T,
+	api *nativeAPI,
+	state *testNativeCapabilitiesState,
+) {
+	t.Helper()
+
+	state.ctx, state.cancel = nativeCancel(t.Context())
+	state.cancel()
 	assertCoreError(
 		t,
-		addCapabilities([]byte{1}, func(*byte) error { return domain.ErrUnsupported }),
+		captureLoadHIDCapabilities(state.ctx(), state.subscription, api),
+		context.Canceled,
+	)
+	testNativeCapabilitiesStep11(t, api, state)
+}
+
+func testNativeCapabilitiesStep11(
+	t *testing.T,
+	api *nativeAPI,
+	state *testNativeCapabilitiesState,
+) {
+	t.Helper()
+
+	state.fixture.err = domain.ErrUnsupported
+	assertCoreError(
+		t,
+		captureLoadHIDCapabilities(t.Context(), state.subscription, api),
 		domain.ErrUnsupported,
 	)
-	builder := &hidBuilder{
-		descriptor: &descriptor{
-			controls:  make(map[hidIndex]hidControl),
-			reportIDs: make(map[byte]bool),
-		},
-	}
-	control := hidControl{native: ext.NativeControl{ReportID: 1, DataIndex: 2}}
-	hidBuilderAdd(builder, &control)
-	hidBuilderAdd(builder, &control)
-	assertCoreEqual(t, len(builder.controls), 1)
-	addCapabilityRange(
-		builder,
-		&capabilityRange{firstUsage: 2, lastUsage: 1},
-		func(uint32, uint32) hidControl { t.Fatal("reversed span iterated"); return hidControl{} },
+
+	state.fixture.err = nil
+	testNativeCapabilitiesStep12(t, api, state)
+}
+
+func testNativeCapabilitiesStep12(
+	t *testing.T,
+	api *nativeAPI,
+	state *testNativeCapabilitiesState,
+) {
+	t.Helper()
+
+	state.fixture.status = noValue
+	assertCoreError(
+		t,
+		captureBuildHIDCapabilities(state.subscription, []byte{singleValue}, api),
+		domain.ErrUnsupported,
 	)
-	nativeOK(t, addNativeCapability(builder, &nativeCapability{alias: 1}))
+
+	state.fixture.status = hid.HIDP_STATUS_SUCCESS
+	testNativeCapabilitiesStep13(t, api, state)
 }
 
-func assertHIDDescriptors(t *testing.T, axis *hid.HIDP_VALUE_CAPS, button *hid.HIDP_BUTTON_CAPS) {
+func testNativeCapabilitiesStep13(
+	t *testing.T,
+	api *nativeAPI,
+	state *testNativeCapabilitiesState,
+) {
 	t.Helper()
-	assertCoreEqual(t, buttonKind(7), domain.ControlKey)
-	assertCoreEqual(t, buttonKind(12), domain.ControlKey)
-	assertCoreEqual(t, buttonKind(9), domain.ControlButton)
-	assertCoreEqual(t, buttonSupport(0), domain.SupportUnsupported)
-	assertCoreEqual(t, buttonSupport(1), domain.SupportSupported)
-	value := *axis
-	value.IsAbsolute = 0
-	ctrl := makeHIDValue(&value, 48, 2)
-	assertCoreEqual(t, ctrl.control.Mode, domain.AxisRelative)
-	value.BitSize = 0
-	ctrl = makeHIDValue(&value, 48, 2)
-	assertCoreEqual(t, ctrl.control.Support, domain.SupportUnsupported)
-	value = *axis
-	value.LogicalMax = 1
-	ctrl = makeHIDValue(&value, 48, 2)
-	assertCoreEqual(t, ctrl.control.Kind, domain.ControlSwitch)
-	value.LogicalMax = 7
-	ctrl = makeHIDValue(&value, hatUsage, 2)
-	assertCoreEqual(t, ctrl.control.Kind, domain.ControlHat)
-	assertCoreEqual(t, ctrl.hat, true)
-	assertCoreEqual(t, conventionalHat(&value, 0, 5), false)
-	value.Units = angularUnits
-	value.PhysicalMax = compassExtent
-	assertCoreEqual(t, conventionalHat(&value, 0, 7), true)
-	value.PhysicalMax = cardinalExtent
-	assertCoreEqual(t, conventionalHat(&value, 0, 3), true)
-	value.PhysicalMax = 1
-	assertCoreEqual(t, conventionalHat(&value, 0, 7), false)
-	value.Units = 1
-	assertCoreEqual(t, conventionalHat(&value, 0, 7), false)
+
+	state.fixture.maxData = maxDevices + singleValue
+	assertCoreError(t, resultError(makeHIDBuilder([]byte{singleValue}, api)), domain.ErrUnsupported)
+
+	state.fixture.maxData = fourthValue
+	testNativeCapabilitiesStep14(t, api, state)
 }
 
-func assertCaptureViews(t *testing.T, fixture *nativeFixture, subscription *capture) {
+func testNativeCapabilitiesStep14(
+	t *testing.T,
+	api *nativeAPI,
+	state *testNativeCapabilitiesState,
+) {
 	t.Helper()
-	view := makeCaptureView(t.Context(), subscription)
-	nativeEqual(t, view.Info(), subscription.info)
-	caps := view.Capabilities()
-	caps.Controls[0].Name = "changed"
-	if subscription.caps.Controls[0].Name == "changed" {
-		t.Fatal("capabilities alias internal state")
+
+	state.fixture.caps.InputReportByteLength = noValue
+
+	assertCoreError(t, resultError(makeHIDBuilder([]byte{singleValue}, api)), domain.ErrUnsupported)
+
+	state.fixture.caps.InputReportByteLength = secondValue
+	testNativeCapabilitiesStep15(t, api, state)
+}
+
+func testNativeCapabilitiesStep15(
+	t *testing.T,
+	api *nativeAPI,
+	state *testNativeCapabilitiesState,
+) {
+	t.Helper()
+
+	state.fixture.buttons[noValue].IsRange = singleValue
+	state.fixture.buttons[noValue].Anonymous.Data[noValue] = secondValue
+	state.fixture.buttons[noValue].Anonymous.Data[singleValue] = singleValue
+	assertCoreError(
+		t,
+		captureBuildHIDCapabilities(state.subscription, []byte{singleValue}, api),
+		domain.ErrUnsupported,
+	)
+	testNativeCapabilitiesStep16(t, api, state)
+}
+
+func testNativeCapabilitiesStep16(
+	t *testing.T,
+	api *nativeAPI,
+	state *testNativeCapabilitiesState,
+) {
+	t.Helper()
+
+	state.fixture.buttons[noValue] = state.button
+	state.fixture.values[noValue].IsRange = singleValue
+	state.fixture.values[noValue].Anonymous.Data[noValue] = secondValue
+	state.fixture.values[noValue].Anonymous.Data[singleValue] = singleValue
+	testNativeCapabilitiesStep17(t, api, state)
+}
+
+func testNativeCapabilitiesStep17(
+	t *testing.T,
+	api *nativeAPI,
+	state *testNativeCapabilitiesState,
+) {
+	t.Helper()
+	assertCoreError(
+		t,
+		captureBuildHIDCapabilities(state.subscription, []byte{singleValue}, api),
+		domain.ErrUnsupported,
+	)
+
+	state.fixture.values[noValue] = state.axis
+	state.fixture.err = domain.ErrUnsupported
+	testNativeCapabilitiesStep18(t, api, state)
+}
+
+func testNativeCapabilitiesStep18(
+	t *testing.T,
+	api *nativeAPI,
+	state *testNativeCapabilitiesState,
+) {
+	t.Helper()
+	assertCoreError(
+		t,
+		resultError(captureReadPreparsedData(state.subscription, api)),
+		domain.ErrUnsupported,
+	)
+	assertCoreError(
+		t,
+		resultError(captureReadPreparsedBuffer(state.subscription, singleValue, api)),
+		domain.ErrUnsupported,
+	)
+
+	state.fixture.err = nil
+	testNativeCapabilitiesStep19(t, api, state)
+}
+
+func testNativeCapabilitiesStep19(
+	t *testing.T,
+	api *nativeAPI,
+	state *testNativeCapabilitiesState,
+) {
+	t.Helper()
+	replaceNative(t, &api.inventory.getRawInputDeviceInfo, func(
+		_ foundation.HANDLE,
+		_ input.RAW_INPUT_DEVICE_INFO_COMMAND,
+		_ unsafe.Pointer,
+		count *uint32,
+	) (uint32, error) {
+		*count = noValue
+
+		return noValue, nil
+	})
+	testNativeCapabilitiesStep19Finish(t, api, state)
+}
+
+func testNativeCapabilitiesStep2(t *testing.T, api *nativeAPI, state *testNativeCapabilitiesState) {
+	t.Helper()
+	assertCoreEqual(t, state.keyboard.caps.Repeat, domain.SupportSupported)
+
+	if len(state.keyboard.caps.Controls) < keyboardScanCount {
+		t.Fatal("missing keyboard controls")
 	}
-	var info ext.Info
-	assertCoreEqual(t, view.Extension(&info), true)
-	info.Controls[0].ID = "changed"
-	if subscription.native.Controls[0].ID == "changed" {
-		t.Fatal("native controls alias internal state")
+
+	state.keyboard.native.Controls = append(
+		state.keyboard.native.Controls,
+		state.keyboard.native.Controls[noValue],
+	)
+	testNativeCapabilitiesStep3(t, api, state)
+}
+
+func testNativeCapabilitiesStep20(
+	t *testing.T,
+	api *nativeAPI,
+	state *testNativeCapabilitiesState,
+) {
+	t.Helper()
+	assertCapabilityBounds(t)
+	assertHIDDescriptors(t, &state.axis)
+	assertCaptureViews(
+		t,
+		state.fixture,
+		&prepareCaptureArgs{subscription: state.keyboard, api: api},
+	)
+}
+
+func testNativeCapabilitiesStep3(t *testing.T, api *nativeAPI, state *testNativeCapabilitiesState) {
+	t.Helper()
+	sortKeyboardControls(state.keyboard)
+
+	state.mouse = state.fixture.capture(t, noValue, api)
+	state.mouse.device.buttons, state.mouse.device.hwheel = thirdValue, true
+	testNativeCapabilitiesStep4(t, api, state)
+}
+
+func testNativeCapabilitiesStep4(t *testing.T, api *nativeAPI, state *testNativeCapabilitiesState) {
+	t.Helper()
+	nativeOK(t, captureLoadCapabilities(t.Context(), state.mouse, api))
+	assertCoreEqual(t, len(state.mouse.caps.Controls), testEleventhValue)
+	assertCoreEqual(t, state.mouse.caps.Controls[noValue].Support, domain.SupportSupported)
+	testNativeCapabilitiesStep5(t, api, state)
+}
+
+func testNativeCapabilitiesStep5(t *testing.T, api *nativeAPI, state *testNativeCapabilitiesState) {
+	t.Helper()
+	assertCoreEqual(t, state.mouse.caps.Controls[fourthValue].Support, domain.SupportUnknown)
+	assertCoreEqual(t, state.mouse.caps.Controls[testTenthValue].Support, domain.SupportSupported)
+	assertCoreError(
+		t,
+		captureLoadCapabilities(t.Context(), state.fixture.capture(t, thirdValue, api), api),
+		domain.ErrUnsupported,
+	)
+	testNativeCapabilitiesStep6(t, api, state)
+}
+
+func testNativeCapabilitiesStep6(t *testing.T, api *nativeAPI, state *testNativeCapabilitiesState) {
+	t.Helper()
+
+	state.subscription = state.fixture.capture(t, secondValue, api)
+	state.button = nativeValue[hid.HIDP_BUTTON_CAPS](func(value *hid.HIDP_BUTTON_CAPS) {
+		value.UsagePage = testButtonPage
+		value.ReportID = singleValue
+		value.IsAbsolute = singleValue
+	})
+	state.button.Anonymous.Data[noValue], state.button.Anonymous.Data[sixthValue] = singleValue, singleValue
+	testNativeCapabilitiesStep7(t, api, state)
+}
+
+func testNativeCapabilitiesStep7(t *testing.T, api *nativeAPI, state *testNativeCapabilitiesState) {
+	t.Helper()
+
+	state.axis = nativeValue[hid.HIDP_VALUE_CAPS](func(value *hid.HIDP_VALUE_CAPS) {
+		value.UsagePage = singleValue
+		value.ReportID = singleValue
+		value.BitSize = eighthValue
+		value.ReportCount = singleValue
+		value.IsAbsolute = singleValue
+		value.LogicalMax = byteMask
+	})
+	state.axis.Anonymous.Data[noValue], state.axis.Anonymous.Data[sixthValue] = testAxisUsage, secondValue
+	state.fixture.buttons, state.fixture.values = []hid.HIDP_BUTTON_CAPS{
+		state.button,
+	}, []hid.HIDP_VALUE_CAPS{
+		state.axis,
 	}
-	var metadata ext.Metadata
-	assertCoreEqual(t, view.Extension(&metadata), true)
-	nativeEqual(t, metadata.NativeInfo(), subscription.native)
-	assertCoreEqual(t, view.Extension(new(string)), false)
-	assertCoreEqual(t, view.Extension((*ext.Info)(nil)), false)
-	assertCoreEqual(t, view.Extension((*ext.Metadata)(nil)), false)
-	nativeOK(t, view.Close())
-	assertCoreEqual(t, subscription.closed.Load(), true)
-	nativeOK(t, view.Close())
-	subscription = fixture.capture(t, 0)
-	subscription.backend.call = func(context.Context, func() error) error { return domain.ErrClosed }
-	nativeOK(t, captureClose(t.Context(), subscription))
-	subscription = fixture.capture(t, 0)
-	subscription.backend.call = func(context.Context, func() error) error { return domain.ErrPermissionDenied }
-	assertCoreError(t, captureClose(t.Context(), subscription), domain.ErrPermissionDenied)
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	_, err := captureCheckOpened(ctx, subscription)
-	assertCoreError(t, err, context.Canceled)
-	result, err := captureCheckOpened(t.Context(), subscription)
-	nativeOK(t, err)
-	assertCoreEqual(t, result, subscription)
+	testNativeCapabilitiesStep8(t, api, state)
+}
+
+func testNativeCapabilitiesStep8(t *testing.T, api *nativeAPI, state *testNativeCapabilitiesState) {
+	t.Helper()
+
+	state.fixture.caps.NumberInputButtonCaps, state.fixture.caps.NumberInputValueCaps = singleValue, singleValue
+	nativeOK(t, captureLoadCapabilities(t.Context(), state.subscription, api))
+	assertCoreEqual(t, state.subscription.caps.Complete, true)
+	testNativeCapabilitiesStep9(t, api, state)
+}
+
+func testNativeCapabilitiesStep9(t *testing.T, api *nativeAPI, state *testNativeCapabilitiesState) {
+	t.Helper()
+	assertCoreEqual(t, len(state.subscription.caps.Controls), secondValue)
+	assertCoreEqual(t, len(state.subscription.native.Controls), secondValue)
+	assertCoreEqual(t, state.subscription.hid.reportIDs[singleValue], true)
+	testNativeCapabilitiesStep10(t, api, state)
+}
+
+func assertCapabilityBoundsStep2Continue(t *testing.T, state *assertCapabilityBoundsState) {
+	t.Helper()
+	assertCoreError(
+		t,
+		resultError(readCapabilities(singleValue, func(_ *byte, count *uint16) foundation.NTSTATUS {
+			*count = secondValue
+
+			return hid.HIDP_STATUS_SUCCESS
+		})),
+		domain.ErrEventLoss,
+	)
+	assertCapabilityBoundsStep3(t, state)
+}
+
+func assertCapabilityBoundsStep4Continue(t *testing.T, state *assertCapabilityBoundsState) {
+	t.Helper()
+
+	state.control = nativeValue[hidControl](func(value *hidControl) {
+		value.native = nativeValue[ext.NativeControl](func(value *ext.NativeControl) {
+			value.ReportID = singleValue
+			value.DataIndex = secondValue
+		})
+	})
+	assertCapabilityBoundsStep5(t, state)
+}
+
+func assertCaptureViewsStep2Continue(
+	t *testing.T,
+	fixture *nativeFixture,
+	args *assertCaptureViewsStep1Args,
+) {
+	t.Helper()
+	assertFixtureCopy(t, args.subscription.caps.Controls[noValue].Name, testCapabilitiesText)
+	assertCaptureViewsStep3(t, fixture, args)
+}
+
+func assertCaptureViewsStep3Continue(
+	t *testing.T,
+	fixture *nativeFixture,
+	args *assertCaptureViewsStep1Args,
+) {
+	t.Helper()
+	assertFixtureCopy(t, args.subscription.native.Controls[noValue].ID, "native controls")
+	assertCaptureViewsStep4(t, fixture, args)
+}
+
+func testNativeCapabilitiesStep19Continue(
+	t *testing.T,
+	api *nativeAPI,
+	state *testNativeCapabilitiesState,
+) {
+	t.Helper()
+	assertTrimmed(t)
+	testNativeCapabilitiesStep20(t, api, state)
+}
+
+func assertFixtureCopy(t *testing.T, value, subject string) {
+	t.Helper()
+
+	if value == testChangedText {
+		t.Fatal(subject + " alias internal state")
+	}
+}
+
+func testNativeCapabilitiesStep19Finish(
+	t *testing.T,
+	api *nativeAPI,
+	state *testNativeCapabilitiesState,
+) {
+	t.Helper()
+	assertCoreError(
+		t,
+		resultError(captureReadPreparsedData(state.subscription, api)),
+		domain.ErrUnsupported,
+	)
+	testNativeCapabilitiesStep19Continue(t, api, state)
 }

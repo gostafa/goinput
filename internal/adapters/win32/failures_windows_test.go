@@ -16,52 +16,172 @@ import (
 	"github.com/gostafa/goinput/internal/domain"
 )
 
-func testNativeLateFailures(t *testing.T) {
-	fixture := newNativeFixture(t)
-	owner := fixtureBackend(t)
-	owner.registrations[topLevel{1, 2}] = 0
-	nativeOK(t, backendCleanupWindow(owner))
-	subscription := fixture.capture(t, 2)
-	fixture.inventory = []input.RAWINPUTDEVICELIST{{HDevice: 1, DwType: input.RIM_TYPEHID}}
-	fixture.status = 0
-	_, err := backendOpen(
-		t.Context(),
-		owner,
-		&backendOpenArguments{id: "win32:test-device", sink: subscription.sink},
+type (
+	testNativeLateFailuresState struct {
+		fixture      *nativeFixture
+		owner        *backend
+		subscription *capture
+		device       *nativeDevice
+		ctx          func() context.Context
+		cancel       context.CancelFunc
+	}
+)
+
+func testNativeLateFailures(t *testing.T, api *nativeAPI) {
+	t.Helper()
+
+	state := new(testNativeLateFailuresState)
+	testNativeLateFailuresStep1(t, api, state)
+}
+
+func testNativeLateFailuresStep1(t *testing.T, api *nativeAPI, state *testNativeLateFailuresState) {
+	t.Helper()
+
+	state.fixture = newNativeFixture(t, api)
+	state.owner = fixtureBackend(t)
+	state.owner.registrations[topLevel{singleValue, secondValue}] = noValue
+	testNativeLateFailuresStep2(t, api, state)
+}
+
+func testNativeLateFailuresStep2(t *testing.T, api *nativeAPI, state *testNativeLateFailuresState) {
+	t.Helper()
+	nativeOK(t, backendCleanupWindow(state.owner, api))
+
+	state.subscription = state.fixture.capture(t, secondValue, api)
+	state.fixture.inventory = []input.RAWINPUTDEVICELIST{
+		nativeValue[input.RAWINPUTDEVICELIST](func(value *input.RAWINPUTDEVICELIST) {
+			value.HDevice = singleValue
+			value.DwType = input.RIM_TYPEHID
+		}),
+	}
+	testNativeLateFailuresStep3(t, api, state)
+}
+
+func testNativeLateFailuresStep3(t *testing.T, api *nativeAPI, state *testNativeLateFailuresState) {
+	t.Helper()
+
+	state.fixture.status = noValue
+
+	openArgs := backendOpenArgs{
+		args: &backendOpenArguments{id: testNativeID, sink: state.subscription.sink},
+		api:  api,
+	}
+	assertCoreError(
+		t,
+		resultError(backendOpen(t.Context(), state.owner, &openArgs)),
+		domain.ErrUnsupported,
 	)
-	assertCoreError(t, err, domain.ErrUnsupported)
-	fixture.status = hid.HIDP_STATUS_SUCCESS
-	fixture.err = domain.ErrUnsupported
-	replaceNative(t, &winFindProcedure, func(*native.Proc) error { return nil })
-	assertCoreError(t, captureLoadHIDCapabilities(t.Context(), subscription), domain.ErrUnsupported)
-	fixture.err = nil
-	fixture.caps.NumberInputButtonCaps = 1
+	testNativeLateFailuresStep3Finish(t, api, state)
+}
+
+func testNativeLateFailuresStep4(t *testing.T, api *nativeAPI, state *testNativeLateFailuresState) {
+	t.Helper()
+
+	state.fixture.err = domain.ErrUnsupported
+
+	replaceNative(t, &api.read.findProcedure, func(*native.Proc) error {
+		return nil
+	})
+	assertCoreError(
+		t,
+		captureLoadHIDCapabilities(t.Context(), state.subscription, api),
+		domain.ErrUnsupported,
+	)
+	testNativeLateFailuresStep5(t, api, state)
+}
+
+func testNativeLateFailuresStep5(t *testing.T, api *nativeAPI, state *testNativeLateFailuresState) {
+	t.Helper()
+
+	state.fixture.err = nil
+	state.fixture.caps.NumberInputButtonCaps = singleValue
+
 	replaceNative(
 		t,
-		&winHidP_GetButtonCaps,
+		&api.hid.hidPGetButtonCaps,
 		func(hid.HIDP_REPORT_TYPE, *hid.HIDP_BUTTON_CAPS, *uint16, hid.PHIDP_PREPARSED_DATA) foundation.NTSTATUS {
-			return 0
+			return noValue
 		},
 	)
-	assertCoreError(t, captureBuildHIDCapabilities(subscription, []byte{1}), domain.ErrUnsupported)
+	testNativeLateFailuresStep6(t, api, state)
+}
 
-	owner = fixtureBackend(t)
-	owner.hwnd = 2
-	device := &nativeDevice{kind: 1, handle: 1, tlc: topLevel{1, 6}}
-	subscription = backendMakeCapture(owner, device, subscription.sink)
-	nativeOK(t, subscription.backend.retry(t.Context(), func(context.Context) error { return nil }))
-	ctx, cancel := context.WithCancel(t.Context())
+func testNativeLateFailuresStep6(t *testing.T, api *nativeAPI, state *testNativeLateFailuresState) {
+	t.Helper()
+	assertCoreError(
+		t,
+		captureBuildHIDCapabilities(state.subscription, []byte{singleValue}, api),
+		domain.ErrUnsupported,
+	)
+
+	state.owner = fixtureBackend(t)
+	state.owner.hwnd = secondValue
+	testNativeLateFailuresStep7(t, api, state)
+}
+
+func testNativeLateFailuresStep7(t *testing.T, api *nativeAPI, state *testNativeLateFailuresState) {
+	t.Helper()
+
+	state.device = nativeNew[nativeDevice](func(value *nativeDevice) {
+		value.kind = singleValue
+		value.handle = singleValue
+		value.tlc = topLevel{singleValue, sixthValue}
+	})
+	state.subscription = backendMakeCapture(
+		state.owner,
+		state.device,
+		&backendMakeCaptureArgs{sink: state.subscription.sink, api: api},
+	)
+	nativeOK(t, state.subscription.backend.retry(t.Context(), func(context.Context) error {
+		return nil
+	}))
+	testNativeLateFailuresStep8(t, api, state)
+}
+
+func testNativeLateFailuresStep8(t *testing.T, api *nativeAPI, state *testNativeLateFailuresState) {
+	t.Helper()
+
+	state.ctx, state.cancel = nativeCancel(t.Context())
 	replaceNative(
 		t,
-		&winRegisterRawInputDevices,
-		func([]input.RAWINPUTDEVICE, uint32) error { cancel(); return nil },
+		&api.inventory.registerRawInputDevices,
+		func([]input.RAWINPUTDEVICE, uint32) error {
+			state.cancel()
+
+			return nil
+		},
 	)
-	replaceNative(
+	replaceNative(t, &api.messages.setEvent, func(foundation.HANDLE) error {
+		go backendDrainCommands(state.owner)
+
+		return nil
+	})
+	testNativeLateFailuresStep9(t, api, state)
+}
+
+func testNativeLateFailuresStep9(t *testing.T, api *nativeAPI, state *testNativeLateFailuresState) {
+	t.Helper()
+	assertCoreError(
 		t,
-		&winSetEvent,
-		func(foundation.HANDLE) error { go backendDrainCommands(owner); return nil },
+		resultError(
+			completeCaptureOpen(
+				state.ctx(),
+				state.owner,
+				&prepareCaptureArgs{subscription: state.subscription, api: api},
+			),
+		),
+		context.Canceled,
 	)
-	_, err = completeCaptureOpen(ctx, owner, subscription)
-	assertCoreError(t, err, context.Canceled)
-	assertCoreEqual(t, subscription.closed.Load(), true)
+	assertCoreEqual(t, state.subscription.closed.Load(), true)
+}
+
+func testNativeLateFailuresStep3Finish(
+	t *testing.T,
+	api *nativeAPI,
+	state *testNativeLateFailuresState,
+) {
+	t.Helper()
+
+	state.fixture.status = hid.HIDP_STATUS_SUCCESS
+	testNativeLateFailuresStep4(t, api, state)
 }

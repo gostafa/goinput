@@ -20,9 +20,10 @@ import (
 )
 
 type (
-	command struct {
-		*commandState
-		reply chan error
+	command                             = commandRecord[*commandState, chan error]
+	commandRecord[State any, Reply any] struct {
+		commandState State
+		reply        Reply
 	}
 
 	captureHost                 = captureServices[*keyTables]
