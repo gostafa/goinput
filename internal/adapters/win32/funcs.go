@@ -46,9 +46,14 @@ func newBackend(ctx context.Context, retrier ports.Retrier) (ports.Backend, erro
 
 func makeBackend(retrier ports.Retrier) *backend {
 	return &backend{
-		commands: make(chan *command, commandCapacity), ready: make(chan error, singleValue),
-		done: make(chan struct{}), retrier: retrier,
-		captures: make(map[foundation.HANDLE]map[*capture]struct{}), registrations: make(map[topLevel]int),
+		commands: make(chan *command, commandCapacity),
+		ready:    make(chan error, singleValue),
+		done:     make(chan struct{}),
+		retrier:  retrier,
+		captures: make(
+			map[foundation.HANDLE]map[*capture]struct{},
+		),
+		registrations: make(map[topLevel]int),
 	}
 }
 
@@ -90,8 +95,11 @@ func (b *backend) initialize() error {
 	}
 	callbackOnce.Do(func() {
 		callbackAddr = syscall.NewCallback(func(hwnd foundation.HWND, message uint32,
-			wParam foundation.WPARAM, lParam foundation.LPARAM) foundation.LRESULT {
-			return windowProc(windowMessage{hwnd: hwnd, message: message, wParam: wParam, lParam: lParam})
+			wParam foundation.WPARAM, lParam foundation.LPARAM,
+		) foundation.LRESULT {
+			return windowProc(
+				windowMessage{hwnd: hwnd, message: message, wParam: wParam, lParam: lParam},
+			)
 		})
 	})
 	event, err := threading.CreateEvent(nil, false, false, nil)
@@ -476,7 +484,10 @@ func readRawDeviceList(count, size uint32) ([]input.RAWINPUTDEVICELIST, error) {
 	return list[:n], nil
 }
 
-func (b *backend) describeDevices(ctx context.Context, list []input.RAWINPUTDEVICELIST) ([]nativeDevice, error) {
+func (b *backend) describeDevices(
+	ctx context.Context,
+	list []input.RAWINPUTDEVICELIST,
+) ([]nativeDevice, error) {
 	snapshot := deviceSnapshot{}
 	for _, item := range list {
 		if err := context.Cause(ctx); err != nil {
@@ -485,7 +496,10 @@ func (b *backend) describeDevices(ctx context.Context, list []input.RAWINPUTDEVI
 		device, err := b.describeRawDevice(ctx, item)
 		snapshot.add(device, err)
 	}
-	slices.SortFunc(snapshot.devices, func(a, b nativeDevice) int { return cmp.Compare(a.info.ID, b.info.ID) })
+	slices.SortFunc(
+		snapshot.devices,
+		func(a, b nativeDevice) int { return cmp.Compare(a.info.ID, b.info.ID) },
+	)
 	return snapshot.devices, errors.Join(snapshot.diagnostics, context.Cause(ctx))
 }
 
@@ -497,7 +511,10 @@ func (snapshot *deviceSnapshot) add(device nativeDevice, err error) {
 	snapshot.devices = append(snapshot.devices, device)
 }
 
-func (b *backend) describeRawDevice(ctx context.Context, item input.RAWINPUTDEVICELIST) (nativeDevice, error) {
+func (b *backend) describeRawDevice(
+	ctx context.Context,
+	item input.RAWINPUTDEVICELIST,
+) (nativeDevice, error) {
 	var device nativeDevice
 	err := b.retry(ctx, func(ctx context.Context) error {
 		var err error
@@ -507,7 +524,11 @@ func (b *backend) describeRawDevice(ctx context.Context, item input.RAWINPUTDEVI
 	return device, err
 }
 
-func (b *backend) Open(ctx context.Context, id domain.DeviceID, sink ports.EventSink) (ports.Capture, error) {
+func (b *backend) Open(
+	ctx context.Context,
+	id domain.DeviceID,
+	sink ports.EventSink,
+) (ports.Capture, error) {
 	device, err := b.findDevice(ctx, id)
 	if err != nil {
 		return nil, err
@@ -533,7 +554,11 @@ func (b *backend) findDevice(ctx context.Context, id domain.DeviceID) (nativeDev
 	return selectDevice(devices, id, err)
 }
 
-func selectDevice(devices []nativeDevice, id domain.DeviceID, diagnostics error) (nativeDevice, error) {
+func selectDevice(
+	devices []nativeDevice,
+	id domain.DeviceID,
+	diagnostics error,
+) (nativeDevice, error) {
 	for _, device := range devices {
 		if device.info.ID == id {
 			return device, nil
@@ -547,8 +572,10 @@ func (b *backend) makeCapture(device nativeDevice, sink ports.EventSink) *captur
 		backend: b, device: device, info: domain.CloneInfo(&device.info), sink: sink,
 		held: make(map[domain.ControlID]bool), values: make(map[domain.ControlID]int64),
 		buttons: make(map[byte]map[domain.ControlID]bool),
-		native: ext.Info{RawInputHandle: uintptr(device.handle), DeviceType: device.kind,
-			UsagePage: device.tlc.page, Usage: device.tlc.usage, Version: device.version},
+		native: ext.Info{
+			RawInputHandle: uintptr(device.handle), DeviceType: device.kind,
+			UsagePage: device.tlc.page, Usage: device.tlc.usage, Version: device.version,
+		},
 	}
 }
 
@@ -669,7 +696,8 @@ func (b *backend) registrationConflict(usage topLevel, list []input.RAWINPUTDEVI
 
 func matchesRegistration(usage topLevel, registration input.RAWINPUTDEVICE) bool {
 	pageOnly := uint32(registration.DwFlags)&fortyEighthValue == thirtySecondValue
-	return registration.UsUsagePage == usage.page && (registration.UsUsage == usage.usage || pageOnly)
+	return registration.UsUsagePage == usage.page &&
+		(registration.UsUsage == usage.usage || pageOnly)
 }
 
 func (b *backend) addRegistration(usage topLevel) error {
@@ -714,7 +742,10 @@ func (b *backend) removeOwnedRegistration(registration input.RAWINPUTDEVICE) err
 	}
 	registration.DwFlags = input.RAWINPUTDEVICE_FLAGS(singleValue)
 	registration.HwndTarget = noValue
-	return input.RegisterRawInputDevices([]input.RAWINPUTDEVICE{registration}, uint32(unsafe.Sizeof(registration)))
+	return input.RegisterRawInputDevices(
+		[]input.RAWINPUTDEVICE{registration},
+		uint32(unsafe.Sizeof(registration)),
+	)
 }
 
 func registeredDevices() ([]input.RAWINPUTDEVICE, error) {
@@ -765,7 +796,8 @@ func rawDeviceList(list *input.RAWINPUTDEVICELIST, count *uint32, size uint32) (
 }
 
 func rawDeviceInfo(handle foundation.HANDLE, command input.RAW_INPUT_DEVICE_INFO_COMMAND,
-	buffer nativeBuffer) (uint32, error) {
+	buffer nativeBuffer,
+) (uint32, error) {
 	n, err := input.GetRawInputDeviceInfo(handle, command, buffer.data, buffer.size)
 	if n == infiniteWait {
 		return n, nonzeroError(err)
@@ -773,7 +805,11 @@ func rawDeviceInfo(handle foundation.HANDLE, command input.RAW_INPUT_DEVICE_INFO
 	return n, nil
 }
 
-func describeDevice(ctx context.Context, handle foundation.HANDLE, kind uint32) (nativeDevice, error) {
+func describeDevice(
+	ctx context.Context,
+	handle foundation.HANDLE,
+	kind uint32,
+) (nativeDevice, error) {
 	device := nativeDevice{handle: handle, kind: kind}
 	if err := device.loadDeviceInfo(); err != nil {
 		return device, err
@@ -792,7 +828,9 @@ func (d *nativeDevice) loadDeviceInfo() error {
 	var info input.RID_DEVICE_INFO
 	info.CbSize = uint32(unsafe.Sizeof(info))
 	size := info.CbSize
-	err := resultError(rawDeviceInfo(d.handle, deviceInfoCommand, nativeBuffer{unsafe.Pointer(&info), &size}))
+	err := resultError(
+		rawDeviceInfo(d.handle, deviceInfoCommand, nativeBuffer{unsafe.Pointer(&info), &size}),
+	)
 	if err != nil {
 		return err
 	}
@@ -844,7 +882,9 @@ func (d *nativeDevice) loadDevicePath() error {
 
 func readDevicePath(handle foundation.HANDLE) (string, error) {
 	var chars uint32
-	if err := resultError(rawDeviceInfo(handle, deviceNameCommand, nativeBuffer{nil, &chars})); err != nil {
+	if err := resultError(
+		rawDeviceInfo(handle, deviceNameCommand, nativeBuffer{nil, &chars}),
+	); err != nil {
 		return emptyString, err
 	}
 	if chars == noValue || chars > maxNativeBuffer/secondValue {
@@ -855,7 +895,13 @@ func readDevicePath(handle foundation.HANDLE) (string, error) {
 
 func readDeviceName(handle foundation.HANDLE, chars uint32) (string, error) {
 	path := make([]uint16, chars+singleValue)
-	err := resultError(rawDeviceInfo(handle, deviceNameCommand, nativeBuffer{unsafe.Pointer(&path[noValue]), &chars}))
+	err := resultError(
+		rawDeviceInfo(
+			handle,
+			deviceNameCommand,
+			nativeBuffer{unsafe.Pointer(&path[noValue]), &chars},
+		),
+	)
 	if err != nil {
 		return emptyString, err
 	}
@@ -867,14 +913,23 @@ func readDeviceName(handle foundation.HANDLE, chars uint32) (string, error) {
 }
 
 func enrichIdentity(d *nativeDevice) {
-	procedures := []*native.Proc{hid.Procs.HidD_GetAttributes, hid.Procs.HidD_GetProductString,
-		hid.Procs.HidD_GetManufacturerString, hid.Procs.HidD_GetSerialNumberString}
+	procedures := []*native.Proc{
+		hid.Procs.HidD_GetAttributes, hid.Procs.HidD_GetProductString,
+		hid.Procs.HidD_GetManufacturerString, hid.Procs.HidD_GetSerialNumberString,
+	}
 	if findProcedures(procedures) != nil {
 		return
 	}
 	// Zero access avoids stealing keyboard/mouse read access from the OS.
-	handle, err := filesystem.CreateFile(d.info.Path, noValue, filesystem.FILE_SHARE_MODE(thirdValue),
-		nil, filesystem.FILE_CREATION_DISPOSITION(thirdValue), noValue, noValue)
+	handle, err := filesystem.CreateFile(
+		d.info.Path,
+		noValue,
+		filesystem.FILE_SHARE_MODE(thirdValue),
+		nil,
+		filesystem.FILE_CREATION_DISPOSITION(thirdValue),
+		noValue,
+		noValue,
+	)
 	if err != nil {
 		return
 	}
@@ -901,7 +956,10 @@ func (d *nativeDevice) loadStrings(handle foundation.HANDLE) {
 	d.info.Serial = readHIDString(handle, hid.HidD_GetSerialNumberString)
 }
 
-func readHIDString(handle foundation.HANDLE, get func(foundation.HANDLE, []byte) foundation.BOOLEAN) string {
+func readHIDString(
+	handle foundation.HANDLE,
+	get func(foundation.HANDLE, []byte) foundation.BOOLEAN,
+) string {
 	data := make([]byte, hidStringBytes)
 	if get(handle, data) == noValue {
 		return emptyString
@@ -922,8 +980,11 @@ func classFor(tlc topLevel) domain.DeviceClass {
 
 func desktopClass(usage uint16) domain.DeviceClass {
 	classes := map[uint16]domain.DeviceClass{
-		secondValue: domain.ClassMouse, fourthValue: domain.ClassJoystick,
-		fifthValue: domain.ClassGamepad, sixthValue: domain.ClassKeyboard, seventhValue: domain.ClassKeyboard,
+		secondValue:  domain.ClassMouse,
+		fourthValue:  domain.ClassJoystick,
+		fifthValue:   domain.ClassGamepad,
+		sixthValue:   domain.ClassKeyboard,
+		seventhValue: domain.ClassKeyboard,
 	}
 	if class, found := classes[usage]; found {
 		return class
@@ -939,7 +1000,8 @@ func nonzeroError(err error) error {
 }
 
 func transient(err error) bool {
-	return errors.Is(err, syscall.Errno(errorInsufficientBuffer)) || errors.Is(err, syscall.Errno(errorMoreData)) ||
+	return errors.Is(err, syscall.Errno(errorInsufficientBuffer)) ||
+		errors.Is(err, syscall.Errno(errorMoreData)) ||
 		errors.Is(err, syscall.Errno(errorNotReady))
 }
 
@@ -982,7 +1044,11 @@ func (c *capture) keyboardCapabilities() {
 	slices.SortFunc(c.native.Controls, compareKeyboardControls)
 }
 
-func (c *capture) addScanControls(controls map[domain.ControlID]domain.Control, scans map[uint16]uint16, page uint16) {
+func (c *capture) addScanControls(
+	controls map[domain.ControlID]domain.Control,
+	scans map[uint16]uint16,
+	page uint16,
+) {
 	for scan, usage := range scans {
 		control := c.makeKeyControl(scan, domain.HID(page, usage))
 		controls[control.ID] = control
@@ -1174,7 +1240,9 @@ func hidProcedures() []*native.Proc {
 func (c *capture) readPreparsedData() ([]byte, error) {
 	var size uint32
 	command := input.RAW_INPUT_DEVICE_INFO_COMMAND(preparsedDataCommand)
-	if err := resultError(rawDeviceInfo(c.device.handle, command, nativeBuffer{nil, &size})); err != nil {
+	if err := resultError(
+		rawDeviceInfo(c.device.handle, command, nativeBuffer{nil, &size}),
+	); err != nil {
 		return nil, err
 	}
 	if size == noValue || size > maxNativeBuffer {
@@ -1210,9 +1278,11 @@ func makeHIDBuilder(data []byte) (*hidBuilder, error) {
 	if status := hid.HidP_GetCaps(pp, &caps); status != hid.HIDP_STATUS_SUCCESS {
 		return nil, hidError("HidP_GetCaps", status)
 	}
-	desc := &descriptor{preparsed: data, reportLen: caps.InputReportByteLength,
+	desc := &descriptor{
+		preparsed: data, reportLen: caps.InputReportByteLength,
 		controls: make(map[hidIndex]hidControl), reportIDs: make(map[byte]bool),
-		maxData: hid.HidP_MaxDataListLength(hid.HidP_Input, pp)}
+		maxData: hid.HidP_MaxDataListLength(hid.HidP_Input, pp),
+	}
 	if desc.maxData > maxDevices || desc.reportLen == noValue {
 		return nil, domain.ErrUnsupported
 	}
@@ -1261,7 +1331,12 @@ func (builder *hidBuilder) readButtonCaps() ([]hid.HIDP_BUTTON_CAPS, error) {
 		return nil, nil
 	}
 	buttons := make([]hid.HIDP_BUTTON_CAPS, count)
-	status := hid.HidP_GetButtonCaps(hid.HidP_Input, &buttons[noValue], &count, builder.preparsedPointer())
+	status := hid.HidP_GetButtonCaps(
+		hid.HidP_Input,
+		&buttons[noValue],
+		&count,
+		builder.preparsedPointer(),
+	)
 	if status != hid.HIDP_STATUS_SUCCESS {
 		return nil, hidError("HidP_GetButtonCaps", status)
 	}
@@ -1349,7 +1424,12 @@ func (builder *hidBuilder) readValueCaps() ([]hid.HIDP_VALUE_CAPS, error) {
 		return nil, nil
 	}
 	values := make([]hid.HIDP_VALUE_CAPS, count)
-	status := hid.HidP_GetValueCaps(hid.HidP_Input, &values[noValue], &count, builder.preparsedPointer())
+	status := hid.HidP_GetValueCaps(
+		hid.HidP_Input,
+		&values[noValue],
+		&count,
+		builder.preparsedPointer(),
+	)
 	if status != hid.HIDP_STATUS_SUCCESS {
 		return nil, hidError("HidP_GetValueCaps", status)
 	}
@@ -1424,7 +1504,11 @@ func (c *capture) commitHID(builder *hidBuilder) {
 	slices.SortFunc(builder.controls, compareControls)
 	slices.SortFunc(builder.nativeControls, compareNativeControls)
 	c.hid = builder.descriptor
-	c.caps = domain.Capabilities{Controls: builder.controls, Complete: true, Repeat: domain.SupportUnsupported}
+	c.caps = domain.Capabilities{
+		Controls: builder.controls,
+		Complete: true,
+		Repeat:   domain.SupportUnsupported,
+	}
 	c.native.Controls = builder.nativeControls
 }
 
@@ -1444,13 +1528,18 @@ func hidID(report byte, collection, index uint16) domain.ControlID {
 }
 
 func capRange(words [eighthValue]uint16, rangeKind foundation.BOOLEAN) (capabilityRange, error) {
-	span := capabilityRange{firstUsage: uint32(words[noValue]), lastUsage: uint32(words[noValue]),
-		firstIndex: uint32(words[sixthValue]), lastIndex: uint32(words[sixthValue])}
+	span := capabilityRange{
+		firstUsage: uint32(words[noValue]), lastUsage: uint32(words[noValue]),
+		firstIndex: uint32(words[sixthValue]), lastIndex: uint32(words[sixthValue]),
+	}
 	if rangeKind != noValue {
 		span.lastUsage, span.lastIndex = uint32(words[singleValue]), uint32(words[seventhValue])
 	}
 	if !span.valid() {
-		return capabilityRange{}, errors.Join(domain.ErrUnsupported, errors.New("invalid HID capability range"))
+		return capabilityRange{}, errors.Join(
+			domain.ErrUnsupported,
+			errors.New("invalid HID capability range"),
+		)
 	}
 	return span, nil
 }
@@ -1461,15 +1550,21 @@ func (span capabilityRange) valid() bool {
 }
 
 func conventionalHat(value hid.HIDP_VALUE_CAPS, minValue, maxValue int64) bool {
-	direction, ok := domain.Hat(minValue, domain.Range{Min: minValue, Max: maxValue}, value.HasNull != noValue)
+	direction, ok := domain.Hat(
+		minValue,
+		domain.Range{Min: minValue, Max: maxValue},
+		value.HasNull != noValue,
+	)
 	if !ok || direction != domain.HatNorth {
 		return false
 	}
-	return conventionalHatUnits(value) && conventionalHatExtent(value.PhysicalMax, maxValue-minValue+singleValue)
+	return conventionalHatUnits(value) &&
+		conventionalHatExtent(value.PhysicalMax, maxValue-minValue+singleValue)
 }
 
 func conventionalHatUnits(value hid.HIDP_VALUE_CAPS) bool {
-	return value.PhysicalMin == noValue && (value.Units == noValue || value.Units == angularUnits) &&
+	return value.PhysicalMin == noValue &&
+		(value.Units == noValue || value.Units == angularUnits) &&
 		value.UnitsExp == noValue
 }
 
@@ -1499,8 +1594,16 @@ func (b *backend) readInput(handle input.HRAWINPUT) {
 }
 
 func rawInputData(handle input.HRAWINPUT, buffer nativeBuffer) (uint32, error) {
-	ret, _, errno := syscall.SyscallN(input.Procs.GetRawInputData.Addr(), uintptr(handle), inputDataCommand,
-		uintptr(buffer.data), uintptr(unsafe.Pointer(buffer.size)), uintptr(unsafe.Sizeof(input.RAWINPUTHEADER{})))
+	ret, _, errno := syscall.SyscallN(
+		input.Procs.GetRawInputData.Addr(),
+		uintptr(handle),
+		inputDataCommand,
+		uintptr(
+			buffer.data,
+		),
+		uintptr(unsafe.Pointer(buffer.size)),
+		uintptr(unsafe.Sizeof(input.RAWINPUTHEADER{})),
+	)
 	if uint32(ret) == infiniteWait {
 		return noValue, errors.Join(domain.ErrEventLoss, native.LastError(errno))
 	}
@@ -1539,10 +1642,12 @@ func decodeInputPacket(data []byte) (inputPacket, error) {
 		return inputPacket{}, domain.ErrEventLoss
 	}
 	now := time.Now()
-	return inputPacket{kind: binary.LittleEndian.Uint32(data),
+	return inputPacket{
+		kind:   binary.LittleEndian.Uint32(data),
 		device: foundation.HANDLE(binary.LittleEndian.Uint64(data[eighthValue:])),
 		body:   data[headerSize:declared],
-		stamp:  domain.Timestamp{Time: now.UTC(), ReceivedAt: now, Source: domain.TimestampReceipt}}, nil
+		stamp:  domain.Timestamp{Time: now.UTC(), ReceivedAt: now, Source: domain.TimestampReceipt},
+	}, nil
 }
 
 func (c *capture) handlePacket(packet inputPacket) {
@@ -1595,9 +1700,11 @@ func (c *capture) keyboard(data []byte, stamp domain.Timestamp) {
 		c.fail(domain.ErrEventLoss)
 		return
 	}
-	key := keyboardInput{makeCode: binary.LittleEndian.Uint16(data),
+	key := keyboardInput{
+		makeCode:   binary.LittleEndian.Uint16(data),
 		flags:      binary.LittleEndian.Uint16(data[secondValue:]),
-		virtualKey: binary.LittleEndian.Uint16(data[sixthValue:])}
+		virtualKey: binary.LittleEndian.Uint16(data[sixthValue:]),
+	}
 	if key.makeCode == byteMask {
 		c.fail(domain.ErrEventLoss)
 		return
@@ -1682,7 +1789,14 @@ func (c *capture) emitKey(key keyboardInput, stamp domain.Timestamp) {
 	id := key.identity()
 	if key.flags&singleValue != noValue {
 		delete(c.held, id)
-		c.emit(domain.Event{ControlID: id, Action: domain.ActionRelease, Value: noValue, Timestamp: stamp})
+		c.emit(
+			domain.Event{
+				ControlID: id,
+				Action:    domain.ActionRelease,
+				Value:     noValue,
+				Timestamp: stamp,
+			},
+		)
 		return
 	}
 	action := domain.ActionPress
@@ -1698,11 +1812,13 @@ func (c *capture) mouse(data []byte, stamp domain.Timestamp) {
 		c.fail(domain.ErrEventLoss)
 		return
 	}
-	mouse := mouseInput{flags: binary.LittleEndian.Uint16(data),
+	mouse := mouseInput{
+		flags:   binary.LittleEndian.Uint16(data),
 		buttons: binary.LittleEndian.Uint16(data[fourthValue:]),
 		wheel:   int16(binary.LittleEndian.Uint16(data[sixthValue:])),
 		x:       int64(int32(binary.LittleEndian.Uint32(data[twelfthValue:]))),
-		y:       int64(int32(binary.LittleEndian.Uint32(data[sixteenthValue:]))), stamp: stamp}
+		y:       int64(int32(binary.LittleEndian.Uint32(data[sixteenthValue:]))), stamp: stamp,
+	}
 	c.mouseButtons(mouse)
 	c.mouseAxes(mouse)
 	c.mouseWheels(mouse)
@@ -1712,10 +1828,24 @@ func (c *capture) mouseButtons(mouse mouseInput) {
 	for i := uint16(noValue); i < fifthValue; i++ {
 		id := domain.ControlID(fmt.Sprintf(buttonIDFormat, i+singleValue))
 		if mouse.buttons&(singleValue<<(i*secondValue)) != noValue {
-			c.emit(domain.Event{ControlID: id, Action: domain.ActionPress, Value: singleValue, Timestamp: mouse.stamp})
+			c.emit(
+				domain.Event{
+					ControlID: id,
+					Action:    domain.ActionPress,
+					Value:     singleValue,
+					Timestamp: mouse.stamp,
+				},
+			)
 		}
 		if mouse.buttons&(singleValue<<(i*secondValue+singleValue)) != noValue {
-			c.emit(domain.Event{ControlID: id, Action: domain.ActionRelease, Value: noValue, Timestamp: mouse.stamp})
+			c.emit(
+				domain.Event{
+					ControlID: id,
+					Action:    domain.ActionRelease,
+					Value:     noValue,
+					Timestamp: mouse.stamp,
+				},
+			)
 		}
 	}
 }
@@ -1735,23 +1865,41 @@ func (c *capture) absoluteAxis(id domain.ControlID, value int64, stamp domain.Ti
 		return
 	}
 	c.values[id] = value
-	c.emit(domain.Event{ControlID: id, Action: domain.ActionChange, Value: float64(value), Timestamp: stamp})
+	c.emit(
+		domain.Event{
+			ControlID: id,
+			Action:    domain.ActionChange,
+			Value:     float64(value),
+			Timestamp: stamp,
+		},
+	)
 }
 
 func (c *capture) relativeAxis(id domain.ControlID, value int64, stamp domain.Timestamp) {
 	if value != noValue {
-		c.emit(domain.Event{ControlID: id, Action: domain.ActionChange, Value: float64(value), Timestamp: stamp})
+		c.emit(
+			domain.Event{
+				ControlID: id,
+				Action:    domain.ActionChange,
+				Value:     float64(value),
+				Timestamp: stamp,
+			},
+		)
 	}
 }
 
 func (c *capture) mouseWheels(mouse mouseInput) {
 	if mouse.buttons&mouseVerticalWheel != noValue {
-		c.emit(domain.Event{ControlID: wheelControlID, Action: domain.ActionChange,
-			Value: float64(mouse.wheel) / wheelDelta, Timestamp: mouse.stamp})
+		c.emit(domain.Event{
+			ControlID: wheelControlID, Action: domain.ActionChange,
+			Value: float64(mouse.wheel) / wheelDelta, Timestamp: mouse.stamp,
+		})
 	}
 	if mouse.buttons&mouseHorizontalWheel != noValue {
-		c.emit(domain.Event{ControlID: panControlID, Action: domain.ActionChange,
-			Value: float64(mouse.wheel) / wheelDelta, Timestamp: mouse.stamp})
+		c.emit(domain.Event{
+			ControlID: panControlID, Action: domain.ActionChange,
+			Value: float64(mouse.wheel) / wheelDelta, Timestamp: mouse.stamp,
+		})
 	}
 }
 
@@ -1798,7 +1946,11 @@ func (c *capture) applyHIDReport(report []byte, stamp domain.Timestamp) {
 		c.fail(err)
 		return
 	}
-	state := hidReportState{reportID: report[noValue], stamp: stamp, pressed: make(map[domain.ControlID]bool)}
+	state := hidReportState{
+		reportID: report[noValue],
+		stamp:    stamp,
+		pressed:  make(map[domain.ControlID]bool),
+	}
 	c.processHIDData(data, state)
 	c.updateButtons(state)
 }
@@ -1807,7 +1959,14 @@ func (c *capture) readHIDReport(report []byte) ([]hid.HIDP_DATA, error) {
 	data := make([]hid.HIDP_DATA, c.hid.maxData)
 	count := uint32(len(data))
 	pp := hid.PHIDP_PREPARSED_DATA(uintptr(unsafe.Pointer(&c.hid.preparsed[noValue])))
-	status := hid.HidP_GetData(hid.HidP_Input, &data[noValue], &count, pp, &report[noValue], uint32(len(report)))
+	status := hid.HidP_GetData(
+		hid.HidP_Input,
+		&data[noValue],
+		&count,
+		pp,
+		&report[noValue],
+		uint32(len(report)),
+	)
 	runtime.KeepAlive(c.hid.preparsed)
 	runtime.KeepAlive(report)
 	if status != hid.HIDP_STATUS_SUCCESS || count > uint32(len(data)) {
@@ -1855,8 +2014,10 @@ func (c *capture) emitHIDValue(control domain.Control, value int64, stamp domain
 		return
 	}
 	c.values[control.ID] = value
-	c.emit(domain.Event{ControlID: control.ID, Action: hidValueAction(control.Kind, value),
-		Value: float64(value), Timestamp: stamp})
+	c.emit(domain.Event{
+		ControlID: control.ID, Action: hidValueAction(control.Kind, value),
+		Value: float64(value), Timestamp: stamp,
+	})
 }
 
 func hidValueAction(kind domain.ControlKind, value int64) domain.EventAction {
@@ -1871,14 +2032,21 @@ func hidValueAction(kind domain.ControlKind, value int64) domain.EventAction {
 
 func (c *capture) updateButtons(state hidReportState) {
 	previous := c.buttons[state.reportID]
-	c.emitButtonChanges(state.pressed, previous, domain.Event{Action: domain.ActionPress,
-		Value: singleValue, Timestamp: state.stamp})
-	c.emitButtonChanges(previous, state.pressed, domain.Event{Action: domain.ActionRelease,
-		Value: noValue, Timestamp: state.stamp})
+	c.emitButtonChanges(state.pressed, previous, domain.Event{
+		Action: domain.ActionPress,
+		Value:  singleValue, Timestamp: state.stamp,
+	})
+	c.emitButtonChanges(previous, state.pressed, domain.Event{
+		Action: domain.ActionRelease,
+		Value:  noValue, Timestamp: state.stamp,
+	})
 	c.buttons[state.reportID] = state.pressed
 }
 
-func (c *capture) emitButtonChanges(current, previous map[domain.ControlID]bool, event domain.Event) {
+func (c *capture) emitButtonChanges(
+	current, previous map[domain.ControlID]bool,
+	event domain.Event,
+) {
 	for id := range current {
 		if !previous[id] {
 			event.ControlID = id
@@ -1894,7 +2062,8 @@ func logicalValue(word uint32, control ext.NativeControl) int64 {
 	}
 	mask := uint64(singleValue)<<bits - singleValue
 	value := uint64(word) & mask
-	if control.Bounds.LogicalMin < noValue && value&(uint64(singleValue)<<(bits-singleValue)) != noValue {
+	if control.Bounds.LogicalMin < noValue &&
+		value&(uint64(singleValue)<<(bits-singleValue)) != noValue {
 		return int64(value) - int64(uint64(singleValue)<<bits)
 	}
 	return int64(value)
