@@ -6,7 +6,7 @@ on:
   workflow_dispatch: null
 
 jobs:
-  pipeline:
+  taskotter:
     name: CI
     runs-on: ubuntu-latest
     permissions:
@@ -23,6 +23,23 @@ jobs:
         uses: $/.github/actions/taskotter
         with:
           github-token: ${{ github.token }}
+  pipeline:
+    name: CI (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
       - name: Set up Task
         uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e  # v2.2.0
       - name: Apply automated fixes and run CI checks
