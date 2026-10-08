@@ -35,11 +35,10 @@ type (
 		firstIndex uint32
 		lastIndex  uint32
 	}
-	command struct {
+	commandState struct {
 		cause     func() error
 		done      <-chan struct{}
 		operation func() error
-		reply     chan error
 		state     atomic.Int32
 	}
 	inputPacketRecord[Stamp any] struct {
@@ -300,18 +299,17 @@ func readScanEntry(row string) (scanCode, hidUsage uint16, err error) {
 	return uint16(key & wordMask), uint16(value & wordMask), errors.Join(keyErr, valueErr)
 }
 
-func makeCommand(ctx context.Context, operation func() error) *command {
-	cmd := new(command)
+func makeCommand(ctx context.Context, operation func() error) *commandState {
+	cmd := new(commandState)
 
 	cmd.cause = func() error { return context.Cause(ctx) }
 	cmd.done = ctx.Done()
 	cmd.operation = operation
-	cmd.reply = make(chan error, singleValue)
 
 	return cmd
 }
 
-func cancelPendingCommand(cmd *command) error {
+func cancelPendingCommand(cmd *commandState) error {
 	if cmd.state.CompareAndSwap(noValue, secondValue) {
 		return errors.Join(cmd.cause())
 	}

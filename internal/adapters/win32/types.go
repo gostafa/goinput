@@ -20,6 +20,11 @@ import (
 )
 
 type (
+	command struct {
+		*commandState
+		reply chan error
+	}
+
 	captureHost                 = captureServices[*keyTables]
 	captureServices[Tables any] struct {
 		tables     Tables

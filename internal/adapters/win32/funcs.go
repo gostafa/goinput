@@ -34,6 +34,17 @@ import (
 	captureview "github.com/gostafa/goinput/internal/ports/capture"
 )
 
+const (
+	relativeAxisPrefix = "rel:"
+	absoluteAxisPrefix = "abs:"
+	axisX              = "x"
+	axisY              = "y"
+	angularUnits       = 0x14
+	buttonIDFormat     = "button:%d"
+	buttonPage         = 9
+	fortyEighthValue   = 0x30
+)
+
 func newBackend(
 	ctx context.Context,
 	environment *nativeState,
@@ -303,7 +314,10 @@ func backendCall(ctx context.Context, owner *backend, operation func() error) er
 		return errors.Join(callErr)
 	}
 
-	cmd := makeCommand(ctx, operation)
+	cmd := &command{
+		commandState: makeCommand(ctx, operation),
+		reply:        make(chan error, singleValue),
+	}
 
 	submitErr := submitCommand(owner, cmd)
 	if submitErr != nil {
@@ -391,7 +405,7 @@ func backendWaitCommandStep(owner *backend, wait *commandWait) {
 	case <-owner.done:
 		wait.err, wait.complete = domain.ErrClosed, true
 	case <-wait.contextDone:
-		wait.err = cancelPendingCommand(wait.command)
+		wait.err = cancelPendingCommand(wait.command.commandState)
 		wait.complete = wait.err != nil
 		wait.contextDone = nil // Native work has started; wait for its result before releasing resources.
 	}

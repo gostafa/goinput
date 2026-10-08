@@ -4,13 +4,6 @@
 package win32
 
 const (
-	relativeAxisPrefix = "rel:"
-	absoluteAxisPrefix = "abs:"
-	axisX              = "x"
-	axisY              = "y"
-	angularUnits       = 0x14
-	buttonIDFormat     = "button:%d"
-	buttonPage         = 9
 	// Used for byteMask, messageInput.
 	byteMask                   = 0xff
 	cardinalExtent             = 270
@@ -38,8 +31,6 @@ const (
 	errorNotReady           = 21
 	// Used for gamepadUsage, mouseButtonCount.
 	fifthValue = 5
-	// Used for desktopXUsage, registrationPageMask.
-	fortyEighthValue = 0x30
 	// Used for joystickUsage, packetSizeOffset, keyExtendedE1, mouseButtonsOffset, cardinalDirections,
 	// waitInputAvailable.
 	fourthValue                 = 4
