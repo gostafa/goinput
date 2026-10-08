@@ -11,11 +11,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
 	"syscall"
-	"time"
 	"unsafe"
 
 	native "github.com/deploymenttheory/go-bindings-win32/bindings/runtime/win32"
@@ -29,317 +30,365 @@ import (
 	ext "github.com/gostafa/goinput/extensions/win32"
 	"github.com/gostafa/goinput/internal/domain"
 	"github.com/gostafa/goinput/internal/ports"
+	backendview "github.com/gostafa/goinput/internal/ports/backend"
+	captureview "github.com/gostafa/goinput/internal/ports/capture"
 )
 
-func newBackend(ctx context.Context, retrier ports.Retrier) (ports.Backend, error) {
-	if err := context.Cause(ctx); err != nil {
-		return nil, err
+func newBackend(
+	ctx context.Context,
+	environment *nativeState,
+	retrier ports.Retrier,
+) (*backend, error) {
+	cause := context.Cause(ctx)
+	if cause != nil {
+		return nil, errors.Join(cause)
 	}
-	b := makeBackend(retrier)
-	go b.run()
-	if err := <-b.ready; err != nil {
-		<-b.done
-		return nil, err
+
+	owner := makeBackend(environment, retrier)
+
+	go backendRun(owner)
+
+	result, err := finishBackendStartup(ctx, owner)
+	if err != nil {
+		return nil, errors.Join(err)
 	}
-	return b.checkStartup(ctx)
+
+	return result, nil
 }
 
-func makeBackend(retrier ports.Retrier) *backend {
-	return &backend{
-		commands: make(chan *command, commandCapacity),
-		ready:    make(chan error, singleValue),
-		done:     make(chan struct{}),
-		retrier:  retrier,
-		captures: make(
-			map[foundation.HANDLE]map[*capture]struct{},
-		),
-		registrations: make(map[topLevel]int),
-	}
+func makeBackend(environment *nativeState, retrier ports.Retrier) *backend {
+	owner := new(backend)
+
+	owner.native, owner.retrier = environment, retrier
+	owner.commands = make(chan *command, commandCapacity)
+	owner.ready = make(chan error, singleValue)
+	owner.done = make(chan struct{})
+	owner.captures = make(map[foundation.HANDLE]map[*capture]struct{})
+	owner.registrations = make(map[topLevel]int)
+
+	return owner
 }
 
-func (b *backend) checkStartup(ctx context.Context) (ports.Backend, error) {
-	if err := context.Cause(ctx); err != nil {
-		return nil, errors.Join(err, b.Close())
+func backendCheckStartup(ctx context.Context, owner *backend) (*backend, error) {
+	cause := context.Cause(ctx)
+	if cause != nil {
+		return nil, errors.Join(cause, backendCloseContext(ctx, owner))
 	}
-	return b, nil
+
+	return owner, nil
 }
 
-func (b *backend) run() {
+func backendRun(owner *backend) {
 	runtime.LockOSThread()
+
 	defer runtime.UnlockOSThread()
+
 	var err error
-	defer func() { b.finish(err) }()
-	err = b.initialize()
-	b.ready <- err
+
+	defer func() { backendFinish(owner, err) }()
+
+	err = backendInitialize(owner)
+	owner.ready <- err
+
 	if err == nil {
-		err = b.messageLoop()
+		err = backendMessageLoop(owner)
 	}
 }
 
 func findProcedures(procedures []*native.Proc) error {
-	for _, procedure := range procedures {
-		if err := procedure.Find(); err != nil {
-			return errors.Join(domain.ErrUnsupported, err)
+	for entryIndex := range procedures {
+		procedure := procedures[entryIndex]
+
+		probeErr := procedure.Find()
+		if probeErr != nil {
+			return errors.Join(domain.ErrUnsupported, probeErr)
 		}
 	}
+
 	return nil
 }
 
-func (b *backend) initialize() error {
+func backendInitialize(owner *backend) error {
 	procedures := []*native.Proc{
 		wm.Procs.MsgWaitForMultipleObjectsEx, wm.Procs.CreateWindowEx,
 		input.Procs.GetRawInputData, input.Procs.RegisterRawInputDevices,
 	}
-	if err := findProcedures(procedures); err != nil {
-		return err
+
+	probeErr := findProcedures(procedures)
+	if probeErr != nil {
+		return errors.Join(probeErr)
 	}
-	callbackOnce.Do(func() {
-		callbackAddr = syscall.NewCallback(func(hwnd foundation.HWND, message uint32,
-			wParam foundation.WPARAM, lParam foundation.LPARAM,
-		) foundation.LRESULT {
-			return windowProc(
-				windowMessage{hwnd: hwnd, message: message, wParam: wParam, lParam: lParam},
-			)
-		})
-	})
+
+	initializeCallback(owner.native)
+
 	event, err := threading.CreateEvent(nil, false, false, nil)
 	if err != nil {
-		return normalizeError(err)
+		return errors.Join(normalizeError(err))
 	}
-	b.wakeEvent = event
-	return b.createWindow()
+
+	owner.wakeEvent = event
+
+	return errors.Join(backendCreateWindow(owner))
 }
 
-func (b *backend) createWindow() error {
+func backendCreateWindow(owner *backend) error {
 	instance, err := libraryloader.GetModuleHandle(nil)
 	if err != nil {
-		return normalizeError(err)
+		return errors.Join(normalizeError(err))
 	}
-	if err := b.registerWindowClass(foundation.HINSTANCE(instance)); err != nil {
-		return err
+
+	registerErr := backendRegisterWindowClass(owner, foundation.HINSTANCE(instance))
+	if registerErr != nil {
+		return errors.Join(registerErr)
 	}
-	window, err := wm.CreateWindowEx(
-		noValue, &b.className, nil, noValue, noValue, noValue,
-		noValue, noValue, wm.HWND_MESSAGE, noValue, foundation.HINSTANCE(instance), nil,
-	)
-	if err != nil {
-		return normalizeError(err)
-	}
-	b.publishWindow(window)
-	return nil
+
+	return errors.Join(backendCreateMessageWindow(owner, foundation.HINSTANCE(instance)))
 }
 
-func (b *backend) publishWindow(window foundation.HWND) {
-	b.mu.Lock()
-	b.hwnd = window
-	b.mu.Unlock()
-	windows.Store(window, b)
+func backendPublishWindow(owner *backend, window foundation.HWND) {
+	owner.mu.Lock()
+
+	owner.hwnd = window
+	owner.mu.Unlock()
+	owner.native.windows.Store(window, owner)
 }
 
-func (b *backend) registerWindowClass(instance foundation.HINSTANCE) error {
-	b.className = fmt.Sprintf("goinput.rawinput.%d", classNumber.Add(singleValue))
-	class := wm.WNDCLASSW{
-		LpfnWndProc: wm.WNDPROC(callbackAddr), HInstance: instance,
-		LpszClassName: native.UTF16Ptr(b.className),
-	}
+func backendRegisterWindowClass(owner *backend, instance foundation.HINSTANCE) error {
+	owner.className = windowClassName(owner.native)
+
+	class := makeWindowClass(owner, instance)
 	atom, err := wm.RegisterClass(&class)
+
 	if atom != noValue {
 		return nil
 	}
-	// The atom is the native success sentinel; successful calls may leave stale errors.
-	b.className = emptyString
-	return normalizeError(nonzeroError(err))
+
+	owner.className = emptyString
+
+	return errors.Join(normalizeError(nonzeroError(err)))
 }
 
-func (b *backend) messageLoop() error {
-	handles := []foundation.HANDLE{b.wakeEvent}
-	for !b.stopping {
-		if err := b.waitForMessages(handles); err != nil {
-			return err
+func backendMessageLoop(owner *backend) error {
+	handles := []foundation.HANDLE{owner.wakeEvent}
+	for !owner.stopping {
+		waitErr := backendWaitForMessages(owner, handles)
+		if waitErr != nil {
+			return errors.Join(waitErr)
 		}
-		if b.dispatchMessages() {
+
+		if backendDispatchMessages(owner) {
 			return nil
 		}
 	}
+
 	return nil
 }
 
-func (b *backend) waitForMessages(handles []foundation.HANDLE) error {
-	ret, _, errno := syscall.SyscallN(
-		wm.Procs.MsgWaitForMultipleObjectsEx.Addr(), singleValue,
-		uintptr(unsafe.Pointer(&handles[noValue])), infiniteWait, queueAllInput, fourthValue,
+func backendWaitForMessages(owner *backend, handles []foundation.HANDLE) error {
+	result, err := wm.MsgWaitForMultipleObjectsEx(
+		handles,
+		infiniteWait,
+		wm.QUEUE_STATUS_FLAGS(
+			queueAllInput,
+		),
+		wm.MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS(fourthValue),
 	)
-	if uint32(ret) == infiniteWait {
-		return normalizeError(native.LastError(errno))
+	if result == infiniteWait {
+		return errors.Join(normalizeError(nonzeroError(err)))
 	}
-	if ret == noValue {
-		b.drainCommands()
+
+	if result == noValue {
+		backendDrainCommands(owner)
 	}
+
 	return nil
 }
 
-func (b *backend) dispatchMessages() bool {
+func backendDispatchMessages(owner *backend) bool {
 	var msg wm.MSG
-	for !b.stopping && wm.PeekMessage(&msg, noValue, noValue, noValue, wm.PEEK_MESSAGE_REMOVE_TYPE(singleValue)) {
+
+	for !owner.stopping && wm.PeekMessage(&msg, noValue, noValue, noValue, wm.PEEK_MESSAGE_REMOVE_TYPE(singleValue)) {
 		if msg.Message == messageQuit {
 			return true
 		}
+
 		wm.DispatchMessage(&msg)
-		b.drainCommands() // High-frequency input must not starve Close/Open.
+		backendDrainCommands(owner) // High-frequency input must not starve Close/Open.
 	}
+
 	return false
 }
 
-func windowProc(event windowMessage) foundation.LRESULT {
-	value, found := windows.Load(event.hwnd)
+func nativeStateWindowProc(environment *nativeState, event *windowMessage) foundation.LRESULT {
+	value, found := environment.windows.Load(event.hwnd)
 	if !found {
-		return event.defaultResult()
+		return windowMessageDefaultResult(event)
 	}
+
 	owner, valid := value.(*backend)
 	if !valid {
-		return event.defaultResult()
+		return windowMessageDefaultResult(event)
 	}
-	return owner.handleWindowMessage(event)
+
+	return backendHandleWindowMessage(owner, event)
 }
 
-func (event windowMessage) defaultResult() foundation.LRESULT {
+func windowMessageDefaultResult(event *windowMessage) foundation.LRESULT {
 	return wm.DefWindowProc(event.hwnd, event.message, event.wParam, event.lParam)
 }
 
-func (b *backend) handleWindowMessage(event windowMessage) foundation.LRESULT {
+func backendHandleWindowMessage(owner *backend, event *windowMessage) foundation.LRESULT {
 	switch event.message {
 	case messageWake:
-		b.drainCommands()
+		backendDrainCommands(owner)
 	case byteMask:
-		return b.handleInputMessage(event)
+		return backendHandleInputMessage(owner, event)
 	case messageDeviceChange:
-		b.handleDeviceChange(event)
+		backendHandleDeviceChange(owner, event)
 	default:
-		return event.defaultResult()
+		return windowMessageDefaultResult(event)
 	}
+
 	return noValue
 }
 
-func (b *backend) handleInputMessage(event windowMessage) foundation.LRESULT {
-	b.readInput(input.HRAWINPUT(event.lParam))
+func backendHandleInputMessage(owner *backend, event *windowMessage) foundation.LRESULT {
+	backendReadInput(owner, input.HRAWINPUT(event.lParam))
+
 	// Foreground WM_INPUT requires the default procedure for native cleanup.
-	if uint32(event.wParam)&byteMask == noValue {
-		return event.defaultResult()
+	if event.wParam&byteMask == noValue {
+		return windowMessageDefaultResult(event)
 	}
+
 	return noValue
 }
 
-func (b *backend) handleDeviceChange(event windowMessage) {
-	if uint32(event.wParam) == secondValue {
-		b.disconnect(foundation.HANDLE(event.lParam))
+func backendHandleDeviceChange(owner *backend, event *windowMessage) {
+	if event.wParam == secondValue {
+		backendDisconnect(owner, foundation.HANDLE(event.lParam))
 	}
 }
 
-func (b *backend) drainCommands() {
+func backendDrainCommands(owner *backend) {
 	for {
 		select {
-		case cmd := <-b.commands:
-			cmd.reply <- b.executeCommand(cmd)
+		case cmd := <-owner.commands:
+			cmd.reply <- backendExecuteCommand(owner, cmd)
 		default:
 			return
 		}
 	}
 }
 
-func (b *backend) executeCommand(cmd *command) error {
+func backendExecuteCommand(owner *backend, cmd *command) error {
 	if !cmd.state.CompareAndSwap(noValue, singleValue) {
-		return context.Canceled
+		return errors.Join(context.Canceled)
 	}
-	if b.stopping {
+
+	if owner.stopping {
 		return domain.ErrClosed
 	}
-	if err := context.Cause(cmd.ctx); err != nil {
-		return err
+
+	cause := cmd.cause()
+	if cause != nil {
+		return errors.Join(cause)
 	}
-	return cmd.fn()
+
+	return errors.Join(cmd.operation())
 }
 
-func (b *backend) call(ctx context.Context, fn func() error) error {
-	if err := b.checkCall(ctx); err != nil {
-		return err
+func backendCall(ctx context.Context, owner *backend, operation func() error) error {
+	callErr := backendCheckCall(ctx, owner)
+	if callErr != nil {
+		return errors.Join(callErr)
 	}
-	cmd := &command{ctx: ctx, fn: fn, reply: make(chan error, singleValue)}
-	if err := b.enqueue(cmd); err != nil {
-		return err
+
+	cmd := makeCommand(ctx, operation)
+
+	submitErr := submitCommand(owner, cmd)
+	if submitErr != nil {
+		return errors.Join(submitErr)
 	}
-	if err := b.signalCommand(cmd); err != nil {
-		return err
-	}
-	return b.awaitCommand(cmd)
+
+	return errors.Join(backendAwaitCommand(owner, cmd))
 }
 
-func (b *backend) checkCall(ctx context.Context) error {
-	if err := context.Cause(ctx); err != nil {
-		return err
+func backendCheckCall(ctx context.Context, owner *backend) error {
+	cause := context.Cause(ctx)
+	if cause != nil {
+		return errors.Join(cause)
 	}
-	if b.isClosed() {
+
+	if backendIsClosed(owner) {
 		return domain.ErrClosed
 	}
+
 	return nil
 }
 
-func (b *backend) isClosed() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.closed
+func backendIsClosed(owner *backend) bool {
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+
+	return owner.closed
 }
 
-func (b *backend) enqueue(cmd *command) error {
+func backendEnqueue(owner *backend, cmd *command) error {
 	select {
-	case b.commands <- cmd:
+	case owner.commands <- cmd:
 		return nil
-	case <-cmd.ctx.Done():
-		return context.Cause(cmd.ctx)
-	case <-b.done:
+	case <-cmd.done:
+		return errors.Join(cmd.cause())
+	case <-owner.done:
 		return domain.ErrClosed
 	}
 }
 
-func (b *backend) signalWake() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.closed {
+func backendSignalWake(owner *backend) error {
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+
+	if owner.closed {
 		return domain.ErrClosed
 	}
+
 	// Holding mu keeps teardown from closing or reusing the HANDLE during SetEvent.
-	return threading.SetEvent(b.wakeEvent)
+	return errors.Join(threading.SetEvent(owner.wakeEvent))
 }
 
-func (b *backend) signalCommand(cmd *command) error {
-	err := b.signalWake()
+func backendSignalCommand(owner *backend, cmd *command) error {
+	err := backendSignalWake(owner)
 	if err == nil {
 		return nil
 	}
+
 	// Commands already running must finish so their acquired resources can be released.
 	if !cmd.state.CompareAndSwap(noValue, secondValue) {
 		return nil
 	}
+
 	select {
-	case <-b.done:
+	case <-owner.done:
 		return domain.ErrClosed
 	default:
-		return normalizeError(err)
+		return errors.Join(normalizeError(err))
 	}
 }
 
-func (b *backend) awaitCommand(cmd *command) error {
-	wait := commandWait{command: cmd, contextDone: cmd.ctx.Done()}
+func backendAwaitCommand(owner *backend, cmd *command) error {
+	wait := commandWait{command: cmd, contextDone: cmd.done, err: nil, complete: false}
 	for !wait.complete {
-		b.waitCommandStep(&wait)
+		backendWaitCommandStep(owner, &wait)
 	}
-	return wait.err
+
+	return errors.Join(wait.err)
 }
 
-func (b *backend) waitCommandStep(wait *commandWait) {
+func backendWaitCommandStep(owner *backend, wait *commandWait) {
 	select {
 	case wait.err = <-wait.command.reply:
 		wait.complete = true
-	case <-b.done:
+	case <-owner.done:
 		wait.err, wait.complete = domain.ErrClosed, true
 	case <-wait.contextDone:
 		wait.err = cancelPendingCommand(wait.command)
@@ -348,210 +397,261 @@ func (b *backend) waitCommandStep(wait *commandWait) {
 	}
 }
 
-func (b *backend) finish(cause error) {
-	b.mu.Lock()
-	b.closed = true
-	b.mu.Unlock()
-	b.failCaptures(cause)
-	cleanupErr := b.cleanupWindow()
-	b.mu.Lock()
-	cleanupErr = errors.Join(cleanupErr, b.closeWakeEvent())
-	b.closeErr = normalizeError(errors.Join(cause, cleanupErr))
-	b.mu.Unlock()
-	close(b.done)
+func backendFinish(owner *backend, cause error) {
+	owner.mu.Lock()
+
+	owner.closed = true
+	owner.mu.Unlock()
+	backendFailCaptures(owner, cause)
+
+	cleanupErr := backendCleanupWindow(owner)
+	owner.mu.Lock()
+
+	cleanupErr = errors.Join(cleanupErr, backendCloseWakeEvent(owner))
+	owner.closeErr = normalizeError(errors.Join(cause, cleanupErr))
+	owner.mu.Unlock()
+	close(owner.done)
 }
 
-func (b *backend) failCaptures(cause error) {
+func backendFailCaptures(owner *backend, cause error) {
 	if cause == nil {
 		cause = domain.ErrClosed
 	}
-	b.failAll(cause)
+
+	backendFailAll(owner, cause)
 }
 
-func (b *backend) cleanupWindow() error {
+func backendCleanupWindow(owner *backend) error {
 	var err error
-	for usage := range b.registrations {
-		err = errors.Join(err, b.removeRegistration(usage))
+
+	for usage := range owner.registrations {
+		err = errors.Join(err, backendRemoveRegistration(owner, usage))
 	}
-	return errors.Join(err, b.destroyWindow(), b.unregisterWindowClass())
+
+	return errors.Join(err, backendDestroyWindow(owner), backendUnregisterWindowClass(owner))
 }
 
-func (b *backend) destroyWindow() error {
-	if b.hwnd == noValue {
+func backendDestroyWindow(owner *backend) error {
+	if owner.hwnd == noValue {
 		return nil
 	}
-	windows.Delete(b.hwnd)
-	return wm.DestroyWindow(b.hwnd)
+
+	owner.native.windows.Delete(owner.hwnd)
+
+	return errors.Join(wm.DestroyWindow(owner.hwnd))
 }
 
-func (b *backend) unregisterWindowClass() error {
-	if b.className == emptyString {
+func backendUnregisterWindowClass(owner *backend) error {
+	if owner.className == emptyString {
 		return nil
 	}
+
 	instance, err := libraryloader.GetModuleHandle(nil)
-	return errors.Join(err, wm.UnregisterClass(b.className, foundation.HINSTANCE(instance)))
+
+	return errors.Join(err, wm.UnregisterClass(owner.className, foundation.HINSTANCE(instance)))
 }
 
-func (b *backend) closeWakeEvent() error {
-	if b.wakeEvent == noValue {
+func backendCloseWakeEvent(owner *backend) error {
+	if owner.wakeEvent == noValue {
 		return nil
 	}
-	err := foundation.CloseHandle(b.wakeEvent)
-	b.wakeEvent = noValue
-	return err
+
+	err := foundation.CloseHandle(owner.wakeEvent)
+
+	owner.wakeEvent = noValue
+
+	return errors.Join(err)
 }
 
-func (b *backend) Close() error {
-	err := b.call(context.Background(), func() error {
-		b.mu.Lock()
-		b.closed = true
-		b.mu.Unlock()
-		b.stopping = true
+func backendCloseContext(ctx context.Context, owner *backend) error {
+	err := backendCall(context.WithoutCancel(ctx), owner, func() error {
+		owner.mu.Lock()
+
+		owner.closed = true
+		owner.mu.Unlock()
+
+		owner.stopping = true
+
 		return nil
 	})
 	if err != nil && !errors.Is(err, domain.ErrClosed) {
-		return err
+		return errors.Join(err)
 	}
-	<-b.done
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.closeErr
+
+	<-owner.done
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+
+	return errors.Join(owner.closeErr)
 }
 
-func (b *backend) Discover(ctx context.Context) ([]domain.DeviceInfo, error) {
-	devices, err := b.enumerateDevices(ctx)
+func backendDiscover(ctx context.Context, owner *backend) ([]domain.DeviceInfo, error) {
+	devices, err := backendEnumerateDevices(ctx, owner)
 	infos := make([]domain.DeviceInfo, noValue, len(devices))
-	for _, d := range devices {
-		infos = append(infos, domain.CloneInfo(&d.info))
+
+	for entryIndex := range devices {
+		device := devices[entryIndex]
+
+		infos = append(infos, domain.CloneInfo(&device.info))
 	}
-	return infos, err
+
+	return infos, errors.Join(err)
 }
 
-func (b *backend) enumerateDevices(ctx context.Context) ([]nativeDevice, error) {
-	if b.isClosed() {
+func backendEnumerateDevices(ctx context.Context, owner *backend) ([]nativeDevice, error) {
+	if backendIsClosed(owner) {
 		return nil, domain.ErrClosed
 	}
-	var list []input.RAWINPUTDEVICELIST
-	op := func(ctx context.Context) error {
-		var err error
-		list, err = enumerateRawDevices(ctx)
-		return err
+
+	list, err := backendRawDevices(ctx, owner)
+	if err != nil {
+		return nil, errors.Join(err)
 	}
-	if err := b.retry(ctx, op); err != nil {
-		return nil, normalizeError(err)
-	}
-	return b.describeDevices(ctx, list)
+
+	result, err := backendDescribeDevices(ctx, owner, list)
+
+	return result, errors.Join(err)
 }
 
-func (b *backend) retry(ctx context.Context, op func(context.Context) error) error {
-	if b.retrier == nil {
-		return op(ctx)
+func backendRetry(
+	ctx context.Context, owner *backend,
+
+	operation func(context.Context) error,
+) error {
+	if owner.retrier == nil {
+		return errors.Join(operation(ctx))
 	}
-	return b.retrier.Do(ctx, op, transient)
+
+	return errors.Join(owner.retrier.Do(ctx, operation, transient))
 }
 
 func enumerateRawDevices(ctx context.Context) ([]input.RAWINPUTDEVICELIST, error) {
-	if err := context.Cause(ctx); err != nil {
-		return nil, err
+	cause := context.Cause(ctx)
+	if cause != nil {
+		return nil, errors.Join(cause)
 	}
-	return queryRawDevices()
+
+	result, err := queryRawDevices()
+
+	return result, errors.Join(err)
 }
 
 func queryRawDevices() ([]input.RAWINPUTDEVICELIST, error) {
 	var count uint32
-	size := uint32(unsafe.Sizeof(input.RAWINPUTDEVICELIST{}))
-	if err := resultError(rawDeviceList(nil, &count, size)); err != nil {
-		return nil, err
+
+	size := nativeSize[input.RAWINPUTDEVICELIST]()
+
+	queryErr := resultError(rawDeviceList(nil, &count, size))
+	if queryErr != nil {
+		return nil, errors.Join(queryErr)
 	}
-	if count > maxDevices {
-		return nil, domain.ErrInvalidOptions
-	}
-	if count == noValue {
-		return nil, nil
-	}
-	return readRawDeviceList(count, size)
+
+	values, readErr := readDeviceInventory(count, size, readRawDeviceList)
+
+	return values, errors.Join(readErr)
 }
 
 func readRawDeviceList(count, size uint32) ([]input.RAWINPUTDEVICELIST, error) {
-	list := make([]input.RAWINPUTDEVICELIST, count)
-	n, err := rawDeviceList(&list[noValue], &count, size)
+	list := allocateBuffer[input.RAWINPUTDEVICELIST](int(count))
+
+	written, err := rawDeviceList(&list[noValue], &count, size)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err)
 	}
-	if uint64(n) > uint64(len(list)) {
+
+	if uint64(written) > uint64(len(list)) {
 		return nil, domain.ErrInvalidOptions
 	}
-	return list[:n], nil
+
+	return list[:written], nil
 }
 
-func (b *backend) describeDevices(
-	ctx context.Context,
+func backendDescribeDevices(
+	ctx context.Context, owner *backend,
 	list []input.RAWINPUTDEVICELIST,
 ) ([]nativeDevice, error) {
-	snapshot := deviceSnapshot{}
-	for _, item := range list {
-		if err := context.Cause(ctx); err != nil {
-			return snapshot.devices, errors.Join(snapshot.diagnostics, err)
+	var snapshot deviceSnapshot
+
+	for entryIndex := range list {
+		cause := context.Cause(ctx)
+		if cause != nil {
+			return snapshot.devices, errors.Join(snapshot.diagnostics, cause)
 		}
-		device, err := b.describeRawDevice(ctx, item)
-		snapshot.add(device, err)
+
+		entry := inventoryEntryArguments{snapshot: &snapshot, item: list[entryIndex]}
+		describeInventoryEntry(ctx, owner, &entry)
 	}
-	slices.SortFunc(
-		snapshot.devices,
-		func(a, b nativeDevice) int { return cmp.Compare(a.info.ID, b.info.ID) },
-	)
-	return snapshot.devices, errors.Join(snapshot.diagnostics, context.Cause(ctx))
+
+	values, err := finishDeviceSnapshot(ctx, &snapshot)
+
+	return values, errors.Join(err)
 }
 
-func (snapshot *deviceSnapshot) add(device nativeDevice, err error) {
+func deviceSnapshotAdd(snapshot *deviceSnapshot, device *nativeDevice, err error) {
 	if err != nil {
 		snapshot.diagnostics = errors.Join(snapshot.diagnostics, normalizeError(err))
+
 		return
 	}
-	snapshot.devices = append(snapshot.devices, device)
+
+	snapshot.devices = append(snapshot.devices, *device)
 }
 
-func (b *backend) describeRawDevice(
-	ctx context.Context,
+func backendDescribeRawDevice(
+	ctx context.Context, owner *backend,
+
 	item input.RAWINPUTDEVICELIST,
 ) (nativeDevice, error) {
 	var device nativeDevice
-	err := b.retry(ctx, func(ctx context.Context) error {
+
+	err := backendRetry(ctx, owner, func(ctx context.Context) error {
 		var err error
+
 		device, err = describeDevice(ctx, item.HDevice, uint32(item.DwType))
-		return err
+
+		return errors.Join(err)
 	})
-	return device, err
+
+	return device, errors.Join(err)
 }
 
-func (b *backend) Open(
-	ctx context.Context,
+func backendOpen(
+	ctx context.Context, owner *backend, args *backendOpenArguments,
+) (*capture, error) {
+	id, sink := args.id, args.sink
+
+	device, err := backendFindDevice(ctx, owner, id)
+	if err != nil {
+		return nil, errors.Join(err)
+	}
+
+	subscription := backendMakeCapture(owner, &device, sink)
+
+	result, openErr := completeCaptureOpen(ctx, owner, subscription)
+	if openErr != nil {
+		return nil, errors.Join(openErr)
+	}
+
+	return result, nil
+}
+
+func backendFindDevice(
+	ctx context.Context, owner *backend,
+
 	id domain.DeviceID,
-	sink ports.EventSink,
-) (ports.Capture, error) {
-	device, err := b.findDevice(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	c := b.makeCapture(device, sink)
-	if err := c.loadCapabilities(ctx); err != nil {
-		return nil, normalizeError(err)
-	}
-	err = b.call(ctx, c.register)
-	if err != nil {
-		return nil, normalizeError(err)
-	}
-	return c.checkOpened(ctx)
-}
-
-func (b *backend) findDevice(ctx context.Context, id domain.DeviceID) (nativeDevice, error) {
+) (nativeDevice, error) {
 	discovery, cancel := context.WithTimeout(ctx, ports.DiscoveryBudget)
-	devices, err := b.enumerateDevices(discovery)
+	devices, err := backendEnumerateDevices(discovery, owner)
+
 	cancel()
+
 	if err != nil && (len(devices) == noValue || context.Cause(ctx) != nil) {
-		return nativeDevice{}, err
+		return nativeDevice{}, errors.Join(err)
 	}
-	return selectDevice(devices, id, err)
+
+	result, err := selectDevice(devices, id, err)
+
+	return result, errors.Join(err)
 }
 
 func selectDevice(
@@ -559,250 +659,306 @@ func selectDevice(
 	id domain.DeviceID,
 	diagnostics error,
 ) (nativeDevice, error) {
-	for _, device := range devices {
+	for entryIndex := range devices {
+		device := devices[entryIndex]
 		if device.info.ID == id {
 			return device, nil
 		}
 	}
+
 	return nativeDevice{}, errors.Join(domain.ErrNotFound, diagnostics)
 }
 
-func (b *backend) makeCapture(device nativeDevice, sink ports.EventSink) *capture {
-	return &capture{
-		backend: b, device: device, info: domain.CloneInfo(&device.info), sink: sink,
-		held: make(map[domain.ControlID]bool), values: make(map[domain.ControlID]int64),
-		buttons: make(map[byte]map[domain.ControlID]bool),
-		native: ext.Info{
-			RawInputHandle: uintptr(device.handle), DeviceType: device.kind,
-			UsagePage: device.tlc.page, Usage: device.tlc.usage, Version: device.version,
-		},
-	}
+func backendMakeCapture(owner *backend, device *nativeDevice, sink ports.EventSink) *capture {
+	subscription := new(capture)
+
+	subscription.device, subscription.sink = *device, sink
+	subscription.info = domain.CloneInfo(&device.info)
+	subscription.native = makeNativeInfo(device)
+	subscription.held = make(map[domain.ControlID]bool)
+	subscription.values = make(map[domain.ControlID]int64)
+	subscription.buttons = make(map[byte]map[domain.ControlID]bool)
+	subscription.backend = makeCaptureHost(owner, subscription)
+
+	return subscription
 }
 
-func (c *capture) loadCapabilities(ctx context.Context) error {
-	switch c.device.kind {
+func captureLoadCapabilities(ctx context.Context, subscription *capture) error {
+	switch subscription.device.kind {
 	case singleValue:
-		c.keyboardCapabilities()
+		captureKeyboardCapabilities(subscription)
 	case noValue:
-		c.mouseCapabilities()
+		captureMouseCapabilities(subscription)
 	case secondValue:
-		return c.hidCapabilities(ctx)
+		return errors.Join(captureHidCapabilities(ctx, subscription))
 	default:
 		return domain.ErrUnsupported
 	}
+
 	return nil
 }
 
-func (c *capture) register() error {
-	b := c.backend
-	if err := b.acquireRegistration(c.device.tlc); err != nil {
-		return err
+func captureRegister(owner *backend, subscription *capture) error {
+	registerErr := backendAcquireRegistration(owner, subscription.device.tlc)
+	if registerErr != nil {
+		return errors.Join(registerErr)
 	}
-	if b.captures[c.device.handle] == nil {
-		b.captures[c.device.handle] = make(map[*capture]struct{})
+
+	if owner.captures[subscription.device.handle] == nil {
+		owner.captures[subscription.device.handle] = make(map[*capture]struct{})
 	}
-	b.captures[c.device.handle][c] = struct{}{}
+
+	owner.captures[subscription.device.handle][subscription] = struct{}{}
+
 	return nil
 }
 
-func (c *capture) checkOpened(ctx context.Context) (ports.Capture, error) {
-	if err := context.Cause(ctx); err != nil {
-		return nil, errors.Join(err, c.Close())
+func captureCheckOpened(ctx context.Context, subscription *capture) (*capture, error) {
+	cause := context.Cause(ctx)
+	if cause != nil {
+		return nil, errors.Join(cause, captureClose(ctx, subscription))
 	}
-	return c, nil
+
+	return subscription, nil
 }
 
-func (c *capture) Info() domain.DeviceInfo { return domain.CloneInfo(&c.info) }
+func captureInfo(subscription *capture) domain.DeviceInfo {
+	return domain.CloneInfo(&subscription.info)
+}
 
-func (c *capture) Capabilities() domain.Capabilities { return domain.CloneCapabilities(&c.caps) }
+func captureCapabilities(subscription *capture) domain.Capabilities {
+	return domain.CloneCapabilities(&subscription.caps)
+}
 
-func (c *capture) NativeInfo() ext.Info {
-	info := c.native
+func captureNativeInfo(subscription *capture) ext.Info {
+	info := subscription.native
+
 	info.Controls = append([]ext.NativeControl(nil), info.Controls...)
+
 	return info
 }
 
-func (c *capture) Extension(target any) bool {
+func captureExtension(subscription *capture, target any) bool {
 	if out, ok := target.(*ext.Info); ok && out != nil {
-		*out = c.NativeInfo()
+		*out = captureNativeInfo(subscription)
+
 		return true
 	}
+
 	if out, ok := target.(*ext.Metadata); ok && out != nil {
-		*out = c
+		*out = metadataView[ext.Info](func() ext.Info { return captureNativeInfo(subscription) })
+
 		return true
 	}
+
 	return false
 }
 
-func (c *capture) Close() error {
-	c.closeOnce.Do(c.closeCapture)
-	return normalizeError(c.closeErr)
+func captureClose(ctx context.Context, subscription *capture) error {
+	subscription.closeOnce.Do(func() { captureCloseCapture(ctx, subscription) })
+
+	return errors.Join(normalizeError(subscription.closeErr))
 }
 
-func (c *capture) closeCapture() {
-	c.closed.Store(true)
-	c.closeErr = c.backend.call(context.Background(), c.unregister)
-	if errors.Is(c.closeErr, domain.ErrClosed) {
-		c.closeErr = nil
+func captureCloseCapture(ctx context.Context, subscription *capture) {
+	subscription.closed.Store(true)
+
+	subscription.closeErr = subscription.backend.call(
+		context.WithoutCancel(ctx),
+		subscription.backend.unregister,
+	)
+	if errors.Is(subscription.closeErr, domain.ErrClosed) {
+		subscription.closeErr = nil
 	}
 }
 
-func (c *capture) unregister() error {
-	group := c.backend.captures[c.device.handle]
-	if _, exists := group[c]; !exists {
+func captureUnregister(owner *backend, subscription *capture) error {
+	group := owner.captures[subscription.device.handle]
+	if _, exists := group[subscription]; !exists {
 		return nil
 	}
-	delete(group, c)
+
+	delete(group, subscription)
+
 	if len(group) == noValue {
-		delete(c.backend.captures, c.device.handle)
+		delete(owner.captures, subscription.device.handle)
 	}
-	return c.backend.releaseRegistration(c.device.tlc)
+
+	return errors.Join(backendReleaseRegistration(owner, subscription.device.tlc))
 }
 
-func (b *backend) acquireRegistration(usage topLevel) error {
+func backendAcquireRegistration(owner *backend, usage topLevel) error {
 	if usage.page == noValue || usage.usage == noValue {
 		return domain.ErrUnsupported
 	}
+
 	list, err := registeredDevices()
 	if err != nil {
-		return err
+		return errors.Join(err)
 	}
-	if b.registrationConflict(usage, list) {
+
+	if backendRegistrationConflict(owner, usage, list) {
 		return domain.ErrRegistrationConflict
 	}
-	return b.retainRegistration(usage)
+
+	return errors.Join(backendRetainRegistration(owner, usage))
 }
 
-func (b *backend) retainRegistration(usage topLevel) error {
-	if b.registrations[usage] != noValue {
-		b.registrations[usage]++
+func backendRetainRegistration(owner *backend, usage topLevel) error {
+	if owner.registrations[usage] != noValue {
+		owner.registrations[usage]++
+
 		return nil
 	}
-	if err := b.addRegistration(usage); err != nil {
-		return err
+
+	registerErr := backendAddRegistration(owner, usage)
+	if registerErr != nil {
+		return errors.Join(registerErr)
 	}
-	b.registrations[usage] = singleValue
+
+	owner.registrations[usage] = singleValue
+
 	return nil
 }
 
-func (b *backend) registrationConflict(usage topLevel, list []input.RAWINPUTDEVICE) bool {
-	for _, registration := range list {
-		if matchesRegistration(usage, registration) && registration.HwndTarget != b.hwnd {
+func backendRegistrationConflict(owner *backend, usage topLevel, list []input.RAWINPUTDEVICE) bool {
+	for entryIndex := range list {
+		registration := list[entryIndex]
+		if matchesRegistration(usage, registration) && registration.HwndTarget != owner.hwnd {
 			return true
 		}
 	}
+
 	return false
 }
 
 func matchesRegistration(usage topLevel, registration input.RAWINPUTDEVICE) bool {
 	pageOnly := uint32(registration.DwFlags)&fortyEighthValue == thirtySecondValue
+
 	return registration.UsUsagePage == usage.page &&
 		(registration.UsUsage == usage.usage || pageOnly)
 }
 
-func (b *backend) addRegistration(usage topLevel) error {
-	return input.RegisterRawInputDevices([]input.RAWINPUTDEVICE{{
+func backendAddRegistration(owner *backend, usage topLevel) error {
+	return errors.Join(input.RegisterRawInputDevices([]input.RAWINPUTDEVICE{{
 		UsUsagePage: usage.page, UsUsage: usage.usage,
-		DwFlags: input.RAWINPUTDEVICE_FLAGS(registrationFlags), HwndTarget: b.hwnd,
-	}}, uint32(unsafe.Sizeof(input.RAWINPUTDEVICE{})))
+		DwFlags: input.RAWINPUTDEVICE_FLAGS(registrationFlags), HwndTarget: owner.hwnd,
+	}}, nativeSize[input.RAWINPUTDEVICE]()))
 }
 
-func (b *backend) releaseRegistration(usage topLevel) error {
-	if b.registrations[usage] > singleValue {
-		b.registrations[usage]--
+func backendReleaseRegistration(owner *backend, usage topLevel) error {
+	if owner.registrations[usage] > singleValue {
+		owner.registrations[usage]--
+
 		return nil
 	}
-	if b.registrations[usage] == noValue {
+
+	if owner.registrations[usage] == noValue {
 		return nil
 	}
-	b.registrations[usage] = noValue
-	err := b.removeRegistration(usage)
+
+	owner.registrations[usage] = noValue
+
+	err := backendRemoveRegistration(owner, usage)
 	if err == nil {
-		delete(b.registrations, usage)
+		delete(owner.registrations, usage)
 	}
-	return err
+
+	return errors.Join(err)
 }
 
-func (b *backend) removeRegistration(usage topLevel) error {
+func backendRemoveRegistration(owner *backend, usage topLevel) error {
 	list, err := registeredDevices()
 	if err != nil {
-		return err
+		return errors.Join(err)
 	}
-	for _, registration := range list {
+
+	for entryIndex := range list {
+		registration := list[entryIndex]
 		if registration.UsUsagePage == usage.page && registration.UsUsage == usage.usage {
-			return b.removeOwnedRegistration(registration)
+			return errors.Join(backendRemoveOwnedRegistration(owner, registration))
 		}
 	}
+
 	return nil
 }
 
-func (b *backend) removeOwnedRegistration(registration input.RAWINPUTDEVICE) error {
-	if registration.HwndTarget != b.hwnd {
+func backendRemoveOwnedRegistration(owner *backend, registration input.RAWINPUTDEVICE) error {
+	if registration.HwndTarget != owner.hwnd {
 		return domain.ErrRegistrationConflict
 	}
+
 	registration.DwFlags = input.RAWINPUTDEVICE_FLAGS(singleValue)
 	registration.HwndTarget = noValue
-	return input.RegisterRawInputDevices(
-		[]input.RAWINPUTDEVICE{registration},
-		uint32(unsafe.Sizeof(registration)),
+
+	return errors.Join(
+		input.RegisterRawInputDevices(
+			[]input.RAWINPUTDEVICE{registration},
+			uint32(unsafe.Sizeof(registration)),
+		),
 	)
 }
 
 func registeredDevices() ([]input.RAWINPUTDEVICE, error) {
 	var count uint32
-	size := uint32(unsafe.Sizeof(input.RAWINPUTDEVICE{}))
-	n, err := input.GetRegisteredRawInputDevices(nil, &count, size)
-	if n == infiniteWait {
-		return nil, nonzeroError(err)
+
+	size := nativeSize[input.RAWINPUTDEVICE]()
+	written, err := input.GetRegisteredRawInputDevices(nil, &count, size)
+
+	if written == infiniteWait {
+		return nil, errors.Join(nonzeroError(err))
 	}
-	if count == noValue {
-		return nil, nil
-	}
-	if count > maxDevices {
-		return nil, domain.ErrInvalidOptions
-	}
-	return readRegisteredDevices(count, size)
+
+	values, readErr := readDeviceInventory(count, size, readRegisteredDevices)
+
+	return values, errors.Join(readErr)
 }
 
 func readRegisteredDevices(count, size uint32) ([]input.RAWINPUTDEVICE, error) {
-	list := make([]input.RAWINPUTDEVICE, count)
-	n, err := input.GetRegisteredRawInputDevices(&list[noValue], &count, size)
-	if n == infiniteWait {
-		return nil, nonzeroError(err)
+	list := allocateBuffer[input.RAWINPUTDEVICE](int(count))
+	written, err := input.GetRegisteredRawInputDevices(&list[noValue], &count, size)
+
+	if written == infiniteWait {
+		return nil, errors.Join(nonzeroError(err))
 	}
-	if uint64(n) > uint64(len(list)) {
+
+	if uint64(written) > uint64(len(list)) {
 		return nil, domain.ErrInvalidOptions
 	}
-	return list[:n], nil // Ignore stale GetLastError on successful UINT results.
+
+	return list[:written], nil // Ignore stale GetLastError on successful UINT results.
 }
 
-func (b *backend) disconnect(handle foundation.HANDLE) {
-	group := b.captures[handle]
-	delete(b.captures, handle)
-	for c := range group {
-		_ = b.releaseRegistration(c.device.tlc)
-		if !c.closed.Swap(true) {
-			c.sink.Fail(domain.ErrDisconnected)
+func backendDisconnect(owner *backend, handle foundation.HANDLE) {
+	group := owner.captures[handle]
+	delete(owner.captures, handle)
+
+	for subscription := range group {
+		releaseErr := backendReleaseRegistration(owner, subscription.device.tlc)
+		if !subscription.closed.Swap(true) {
+			subscription.sink.Fail(errors.Join(domain.ErrDisconnected, releaseErr))
 		}
 	}
 }
 
 func rawDeviceList(list *input.RAWINPUTDEVICELIST, count *uint32, size uint32) (uint32, error) {
-	n, err := input.GetRawInputDeviceList(list, count, size)
-	if n == infiniteWait {
-		return n, nonzeroError(err)
+	written, err := input.GetRawInputDeviceList(list, count, size)
+	if written == infiniteWait {
+		return written, errors.Join(nonzeroError(err))
 	}
-	return n, nil
+
+	return written, nil
 }
 
 func rawDeviceInfo(handle foundation.HANDLE, command input.RAW_INPUT_DEVICE_INFO_COMMAND,
 	buffer nativeBuffer,
 ) (uint32, error) {
-	n, err := input.GetRawInputDeviceInfo(handle, command, buffer.data, buffer.size)
-	if n == infiniteWait {
-		return n, nonzeroError(err)
+	written, err := input.GetRawInputDeviceInfo(handle, command, buffer.data, buffer.size)
+	if written == infiniteWait {
+		return written, errors.Join(nonzeroError(err))
 	}
-	return n, nil
+
+	return written, nil
 }
 
 func describeDevice(
@@ -810,164 +966,180 @@ func describeDevice(
 	handle foundation.HANDLE,
 	kind uint32,
 ) (nativeDevice, error) {
-	device := nativeDevice{handle: handle, kind: kind}
-	if err := device.loadDeviceInfo(); err != nil {
-		return device, err
+	var device nativeDevice
+
+	device.handle, device.kind = handle, kind
+
+	err := loadDeviceMetadata(&device)
+	if err != nil {
+		return device, errors.Join(err)
 	}
-	if err := device.loadDevicePath(); err != nil {
-		return device, err
-	}
-	if err := context.Cause(ctx); err != nil {
-		return device, err
-	}
-	enrichIdentity(&device)
-	return device, nil
+
+	identityErr := enrichDeviceIdentity(ctx, &device)
+
+	return device, errors.Join(identityErr)
 }
 
-func (d *nativeDevice) loadDeviceInfo() error {
+func nativeDeviceLoadDeviceInfo(device *nativeDevice) error {
 	var info input.RID_DEVICE_INFO
+
 	info.CbSize = uint32(unsafe.Sizeof(info))
+
 	size := info.CbSize
+
 	err := resultError(
-		rawDeviceInfo(d.handle, deviceInfoCommand, nativeBuffer{unsafe.Pointer(&info), &size}),
+		rawDeviceInfo(device.handle, deviceInfoCommand, nativeBuffer{nativePointer(&info), &size}),
 	)
 	if err != nil {
-		return err
+		return errors.Join(err)
 	}
-	return d.applyDeviceInfo(info.Anonymous.Data)
+
+	return errors.Join(nativeDeviceApplyDeviceInfo(device, info.Anonymous.Data))
 }
 
-func (d *nativeDevice) applyDeviceInfo(words [sixthValue]uint32) error {
-	switch d.kind {
+func nativeDeviceApplyDeviceInfo(device *nativeDevice, words [sixthValue]uint32) error {
+	switch device.kind {
 	case noValue:
-		d.tlc = topLevel{singleValue, secondValue}
-		d.buttons, d.hwheel = words[singleValue], words[thirdValue] != noValue
-		d.info.Classes = []domain.DeviceClass{domain.ClassMouse}
+		applyMouseDeviceInfo(device, words)
 	case singleValue:
-		d.tlc = topLevel{singleValue, sixthValue}
-		d.info.Classes = []domain.DeviceClass{domain.ClassKeyboard}
+		applyKeyboardDeviceInfo(device)
 	case secondValue:
-		d.applyHIDDeviceInfo(words)
+		nativeDeviceApplyHIDDeviceInfo(device, words)
 	default:
 		return domain.ErrUnsupported
 	}
+
 	return nil
 }
 
-func (d *nativeDevice) applyHIDDeviceInfo(words [sixthValue]uint32) {
-	d.tlc = topLevel{uint16(words[thirdValue]), uint16(words[thirdValue] >> sixteenthValue)}
-	d.version = words[secondValue]
-	d.info.VendorID = optionalWord(words[noValue])
-	d.info.ProductID = optionalWord(words[singleValue])
-	d.info.Classes = []domain.DeviceClass{classFor(d.tlc)}
+func nativeDeviceApplyHIDDeviceInfo(device *nativeDevice, words [sixthValue]uint32) {
+	device.tlc = topLevel{
+		uint16(words[thirdValue] & wordMask),
+		uint16(words[thirdValue] >> sixteenthValue),
+	}
+	device.version = words[secondValue]
+	device.info.VendorID = optionalWord(words[noValue])
+	device.info.ProductID = optionalWord(words[singleValue])
+	device.info.Classes = []domain.DeviceClass{classFor(device.tlc)}
 }
 
 func optionalWord(value uint32) *uint16 {
 	if value > wordMask {
 		return nil
 	}
+
 	result := uint16(value)
+
 	return &result
 }
 
-func (d *nativeDevice) loadDevicePath() error {
-	path, err := readDevicePath(d.handle)
+func nativeDeviceLoadDevicePath(device *nativeDevice) error {
+	path, err := readDevicePath(device.handle)
 	if err != nil {
-		return err
+		return errors.Join(err)
 	}
-	d.info.Path = path
-	d.info.ID = domain.DeviceID("win32:" + strings.ToLower(path))
+
+	device.info.Path = path
+	device.info.ID = domain.DeviceID("win32:" + strings.ToLower(path))
+
 	return nil
 }
 
 func readDevicePath(handle foundation.HANDLE) (string, error) {
 	var chars uint32
-	if err := resultError(
+
+	queryErr := resultError(
 		rawDeviceInfo(handle, deviceNameCommand, nativeBuffer{nil, &chars}),
-	); err != nil {
-		return emptyString, err
+	)
+	if queryErr != nil {
+		return emptyString, errors.Join(queryErr)
 	}
+
 	if chars == noValue || chars > maxNativeBuffer/secondValue {
 		return emptyString, domain.ErrNotFound
 	}
-	return readDeviceName(handle, chars)
+
+	result, err := readDeviceName(handle, chars)
+
+	return result, errors.Join(err)
 }
 
 func readDeviceName(handle foundation.HANDLE, chars uint32) (string, error) {
-	path := make([]uint16, chars+singleValue)
+	path := allocateBuffer[uint16](int(chars + singleValue))
+
 	err := resultError(
 		rawDeviceInfo(
 			handle,
 			deviceNameCommand,
-			nativeBuffer{unsafe.Pointer(&path[noValue]), &chars},
+			nativeBuffer{nativePointer(&path[noValue]), &chars},
 		),
 	)
 	if err != nil {
-		return emptyString, err
+		return emptyString, errors.Join(err)
 	}
+
 	result := syscall.UTF16ToString(path)
 	if result == emptyString {
 		return emptyString, domain.ErrNotFound
 	}
+
 	return result, nil
 }
 
-func enrichIdentity(d *nativeDevice) {
-	procedures := []*native.Proc{
-		hid.Procs.HidD_GetAttributes, hid.Procs.HidD_GetProductString,
-		hid.Procs.HidD_GetManufacturerString, hid.Procs.HidD_GetSerialNumberString,
+func enrichIdentity(device *nativeDevice) (err error) {
+	if !identityProceduresAvailable() {
+		return nil
 	}
-	if findProcedures(procedures) != nil {
-		return
+
+	handle, openErr := openIdentityHandle(device.info.Path)
+	if openErr != nil {
+		return nil
 	}
-	// Zero access avoids stealing keyboard/mouse read access from the OS.
-	handle, err := filesystem.CreateFile(
-		d.info.Path,
-		noValue,
-		filesystem.FILE_SHARE_MODE(thirdValue),
-		nil,
-		filesystem.FILE_CREATION_DISPOSITION(thirdValue),
-		noValue,
-		noValue,
-	)
-	if err != nil {
-		return
-	}
-	defer foundation.CloseHandle(handle)
-	d.loadAttributes(handle)
-	d.loadStrings(handle)
+
+	defer func() { err = errors.Join(err, foundation.CloseHandle(handle.value)) }()
+
+	nativeDeviceLoadAttributes(device, handle.value)
+	nativeDeviceLoadStrings(device, handle.value)
+
+	return nil
 }
 
-func (d *nativeDevice) loadAttributes(handle foundation.HANDLE) {
+func nativeDeviceLoadAttributes(device *nativeDevice, handle foundation.HANDLE) {
 	var attributes hid.HIDD_ATTRIBUTES
+
 	attributes.Size = uint32(unsafe.Sizeof(attributes))
+
 	if hid.HidD_GetAttributes(handle, &attributes) != noValue {
 		vendor, product := attributes.VendorID, attributes.ProductID
-		d.info.VendorID, d.info.ProductID = &vendor, &product
-		d.version = uint32(attributes.VersionNumber)
+
+		device.info.VendorID, device.info.ProductID = &vendor, &product
+		device.version = uint32(attributes.VersionNumber)
 	}
 }
 
-func (d *nativeDevice) loadStrings(handle foundation.HANDLE) {
+func nativeDeviceLoadStrings(device *nativeDevice, handle foundation.HANDLE) {
 	if name := readHIDString(handle, hid.HidD_GetProductString); name != emptyString {
-		d.info.Name = name
+		device.info.Name = name
 	}
-	d.info.Manufacturer = readHIDString(handle, hid.HidD_GetManufacturerString)
-	d.info.Serial = readHIDString(handle, hid.HidD_GetSerialNumberString)
+
+	device.info.Manufacturer = readHIDString(handle, hid.HidD_GetManufacturerString)
+	device.info.Serial = readHIDString(handle, hid.HidD_GetSerialNumberString)
 }
 
 func readHIDString(
 	handle foundation.HANDLE,
 	get func(foundation.HANDLE, []byte) foundation.BOOLEAN,
 ) string {
-	data := make([]byte, hidStringBytes)
+	data := allocateBuffer[byte](hidStringBytes)
 	if get(handle, data) == noValue {
 		return emptyString
 	}
-	wide := make([]uint16, len(data)/secondValue)
-	for i := range wide {
-		wide[i] = binary.LittleEndian.Uint16(data[i*secondValue:])
+
+	wide := allocateBuffer[uint16](len(data) / secondValue)
+	for index := range wide {
+		wide[index] = binary.LittleEndian.Uint16(data[index*secondValue:])
 	}
+
 	return syscall.UTF16ToString(wide)
 }
 
@@ -975,6 +1147,7 @@ func classFor(tlc topLevel) domain.DeviceClass {
 	if tlc.page != singleValue {
 		return domain.ClassOther
 	}
+
 	return desktopClass(tlc.usage)
 }
 
@@ -989,14 +1162,16 @@ func desktopClass(usage uint16) domain.DeviceClass {
 	if class, found := classes[usage]; found {
 		return class
 	}
+
 	return domain.ClassOther
 }
 
 func nonzeroError(err error) error {
 	if err == nil {
-		return syscall.EINVAL
+		return errors.Join(syscall.EINVAL)
 	}
-	return err
+
+	return errors.Join(err)
 }
 
 func transient(err error) bool {
@@ -1009,6 +1184,7 @@ func normalizeError(err error) error {
 	if err == nil {
 		return nil
 	}
+
 	categories := []errorCategory{
 		{syscall.ERROR_ACCESS_DENIED, domain.ErrPermissionDenied},
 		{syscall.Errno(thirtySecondValue), domain.ErrPermissionDenied},
@@ -1018,123 +1194,103 @@ func normalizeError(err error) error {
 		{syscall.Errno(errorDeviceDisconnected), domain.ErrDisconnected},
 		{syscall.Errno(errorInvalidParameter), domain.ErrInvalidOptions},
 	}
-	return categorizeError(err, categories)
+
+	return errors.Join(categorizeError(err, categories))
 }
 
 func categorizeError(err error, categories []errorCategory) error {
-	for _, category := range categories {
+	for entryIndex := range categories {
+		category := categories[entryIndex]
 		if errors.Is(err, category.native) {
 			return errors.Join(category.domain, err)
 		}
 	}
-	return err
+
+	return errors.Join(err)
 }
 
-func (c *capture) keyboardCapabilities() {
+func captureKeyboardCapabilities(subscription *capture) {
 	controls := make(map[domain.ControlID]domain.Control)
-	c.addScanControls(controls, scanUsages, seventhValue)
-	c.addScanControls(controls, consumerScans, twelfthValue)
-	c.addVirtualControls(controls)
-	c.addSystemControls(controls)
-	for _, control := range controls {
-		c.caps.Controls = append(c.caps.Controls, control)
-	}
-	c.caps.Repeat = domain.SupportSupported
-	slices.SortFunc(c.caps.Controls, compareControls)
-	slices.SortFunc(c.native.Controls, compareKeyboardControls)
+	addPhysicalKeyControls(subscription, controls)
+	captureAddVirtualControls(subscription, controls)
+	captureAddSystemControls(subscription, controls)
+
+	appendKeyboardControls(subscription, controls)
+
+	subscription.caps.Repeat = domain.SupportSupported
+	sortKeyboardControls(subscription)
 }
 
-func (c *capture) addScanControls(
-	controls map[domain.ControlID]domain.Control,
-	scans map[uint16]uint16,
-	page uint16,
+func captureAddScanControls(subscription *capture,
+	controls map[domain.ControlID]domain.Control, args *captureAddScanControlsArguments,
 ) {
-	for scan, usage := range scans {
-		control := c.makeKeyControl(scan, domain.HID(page, usage))
+	scans, page := args.scans, args.page
+	for scan := range scans {
+		usage := scans[scan]
+		control := captureMakeKeyControl(subscription, scan, domain.HID(page, usage))
+
 		controls[control.ID] = control
 	}
 }
 
-func (c *capture) addVirtualControls(controls map[domain.ControlID]domain.Control) {
-	for key, usage := range consumerVirtualKeys {
-		control := c.makeKeyControl(virtualScanPrefix|key, domain.HID(twelfthValue, usage))
+func captureAddVirtualControls(
+	subscription *capture,
+	controls map[domain.ControlID]domain.Control,
+) {
+	for key := range subscription.backend.tables.virtual {
+		usage := subscription.backend.tables.virtual[key]
+		control := captureMakeKeyControl(subscription,
+			virtualScanPrefix|key,
+			domain.HID(twelfthValue, usage),
+		)
+
 		controls[control.ID] = control
 	}
 }
 
-func (c *capture) addSystemControls(controls map[domain.ControlID]domain.Control) {
-	for _, scan := range []uint16{scanPower, scanSleep, scanWake} {
-		control := c.makeKeyControl(scan, systemScanUsage(scan))
+func captureAddSystemControls(subscription *capture, controls map[domain.ControlID]domain.Control) {
+	for entryIndex := range []uint16{scanPower, scanSleep, scanWake} {
+		scan := []uint16{scanPower, scanSleep, scanWake}[entryIndex]
+		control := captureMakeKeyControl(subscription, scan, systemScanUsage(scan))
+
 		controls[control.ID] = control
 	}
 }
 
-func (c *capture) makeKeyControl(scan uint16, usage domain.Usage) domain.Control {
-	id := keyID(usage, scan)
-	control := domain.Control{
-		Mode:    domain.AxisUnknown,
-		ID:      id,
-		Name:    fmt.Sprintf("Key %04x:%04x", uint16(usage>>sixteenthValue), uint16(usage)),
-		Kind:    domain.ControlKey,
-		Usage:   usage,
-		Mapping: domain.MappingInferred,
-		Range:   &domain.Range{Min: noValue, Max: singleValue},
-		Unit:    domain.UnitBoolean,
-		Support: domain.SupportUnknown,
-	}
-	nativeControl := ext.NativeControl{
-		ID:       string(id),
-		ScanCode: scan,
-	}
-	if scan&virtualScanPrefix == virtualScanPrefix {
-		nativeControl.ScanCode, nativeControl.VirtualKey = noValue, scan&byteMask
-	}
-	c.native.Controls = append(c.native.Controls, nativeControl)
+func captureMakeKeyControl(subscription *capture, scan uint16, usage domain.Usage) domain.Control {
+	control := makeKeyDescriptor(scan, usage)
+	nativeControl := makeKeyNative(control.ID, scan)
+
+	subscription.native.Controls = append(subscription.native.Controls, nativeControl)
+
 	return control
 }
 
-func compareKeyboardControls(a, b ext.NativeControl) int {
-	if a.ID == b.ID {
-		return cmp.Compare(a.ScanCode, b.ScanCode)
-	}
-	return cmp.Compare(a.ID, b.ID)
-}
+func captureMouseCapabilities(subscription *capture) {
+	subscription.caps.Repeat = domain.SupportUnsupported
+	captureAddMouseButtons(subscription)
+	captureAddMouseAxes(subscription)
+	captureAddMouseWheels(subscription)
 
-func keyID(usage domain.Usage, scan uint16) domain.ControlID {
-	if scan&virtualScanPrefix == virtualScanPrefix {
-		return domain.ControlID(fmt.Sprintf("key:virtual:%04x", scan&byteMask))
-	}
-	if scan != noValue {
-		return domain.ControlID(fmt.Sprintf("key:scan:%04x", scan))
-	}
-	if usage != noValue {
-		return domain.ControlID(fmt.Sprintf("key:%08x", uint32(usage)))
-	}
-	return domain.ControlID(fmt.Sprintf("key:native:%04x", scan))
-}
-
-func (c *capture) mouseCapabilities() {
-	c.caps.Repeat = domain.SupportUnsupported
-	c.addMouseButtons()
-	c.addMouseAxes()
-	c.addMouseWheels()
-	if c.device.hwheel {
-		c.caps.Controls[len(c.caps.Controls)-singleValue].Support = domain.SupportSupported
+	if subscription.device.hwheel {
+		subscription.caps.Controls[len(subscription.caps.Controls)-singleValue].Support = domain.SupportSupported
 	}
 }
 
-func (c *capture) addMouseButtons() {
-	for i := uint16(singleValue); i <= fifthValue; i++ {
+func captureAddMouseButtons(subscription *capture) {
+	for index := uint16(singleValue); index <= fifthValue; index++ {
 		support := domain.SupportUnknown
-		if uint32(i) <= c.device.buttons {
+
+		if uint32(index) <= subscription.device.buttons {
 			support = domain.SupportSupported
 		}
-		c.caps.Controls = append(c.caps.Controls, domain.Control{
+
+		subscription.caps.Controls = append(subscription.caps.Controls, domain.Control{
 			Mode:    domain.AxisUnknown,
-			ID:      domain.ControlID(fmt.Sprintf(buttonIDFormat, i)),
-			Name:    fmt.Sprintf("Button %d", i),
+			ID:      domain.ControlID(fmt.Sprintf(buttonIDFormat, index)),
+			Name:    fmt.Sprintf("Button %d", index),
 			Kind:    domain.ControlButton,
-			Usage:   domain.HID(buttonPage, i),
+			Usage:   domain.HID(buttonPage, index),
 			Mapping: domain.MappingInferred,
 			Range:   &domain.Range{Min: noValue, Max: singleValue},
 			Unit:    domain.UnitBoolean,
@@ -1143,90 +1299,66 @@ func (c *capture) addMouseButtons() {
 	}
 }
 
-func (c *capture) addMouseAxes() {
-	for i, axis := range []string{"x", "y"} {
-		c.caps.Controls = append(c.caps.Controls,
-			domain.Control{
-				ID: domain.ControlID(
-					"rel:" + axis,
-				),
-				Name:    "Relative " + strings.ToUpper(axis),
-				Kind:    domain.ControlAxis,
-				Usage:   domain.HID(singleValue, uint16(fortyEighthValue+i)),
-				Mapping: domain.MappingInferred,
-				Mode:    domain.AxisRelative,
-				Unit:    domain.UnitCounts,
-				Support: domain.SupportUnknown,
-			},
-			domain.Control{
-				ID: domain.ControlID(
-					"abs:" + axis,
-				),
-				Name:    "Absolute " + strings.ToUpper(axis),
-				Kind:    domain.ControlAxis,
-				Usage:   domain.HID(singleValue, uint16(fortyEighthValue+i)),
-				Mapping: domain.MappingInferred,
-				Mode:    domain.AxisAbsolute,
-				Range:   &domain.Range{Min: noValue, Max: wordMask},
-				Unit:    domain.UnitLogical,
-				Support: domain.SupportUnknown,
-			})
+func captureAddMouseAxes(subscription *capture) {
+	axes := []string{axisX, axisY}
+	for index := range axes {
+		usage := domain.HID(singleValue, uint16(fortyEighthValue+index))
+		relative := makeMouseAxis(axes[index], usage)
+		absolute := makeAbsoluteMouseAxis(axes[index], usage)
+
+		subscription.caps.Controls = append(subscription.caps.Controls, relative, absolute)
 	}
 }
 
-func (c *capture) addMouseWheels() {
-	c.caps.Controls = append(
-		c.caps.Controls,
-		domain.Control{
-			ID:      wheelControlID,
-			Name:    "Wheel",
-			Kind:    domain.ControlAxis,
-			Usage:   domain.HID(singleValue, wheelUsage),
-			Mapping: domain.MappingInferred,
-			Mode:    domain.AxisRelative,
-			Unit:    domain.UnitDetents,
-			Support: domain.SupportUnknown,
-		},
-		domain.Control{
-			ID:      panControlID,
-			Name:    "Horizontal wheel",
-			Kind:    domain.ControlAxis,
-			Usage:   domain.HID(twelfthValue, panUsage),
-			Mapping: domain.MappingInferred,
-			Mode:    domain.AxisRelative,
-			Unit:    domain.UnitDetents,
-			Support: domain.SupportUnknown,
-		},
+func captureAddMouseWheels(subscription *capture) {
+	wheel := makeMouseWheel(wheelControlID, domain.HID(singleValue, wheelUsage), "Wheel")
+	pan := makeMouseWheel(panControlID, domain.HID(twelfthValue, panUsage), "Horizontal wheel")
+
+	subscription.caps.Controls = append(subscription.caps.Controls, wheel, pan)
+}
+
+func captureHidCapabilities(ctx context.Context, subscription *capture) error {
+	return errors.Join(
+		captureRetryMetadata(
+			ctx,
+			subscription,
+			func(ctx context.Context) error { return errors.Join(captureLoadHIDCapabilities(ctx, subscription)) },
+		),
 	)
 }
 
-func (c *capture) hidCapabilities(ctx context.Context) error {
-	return c.retryMetadata(ctx, c.loadHIDCapabilities)
-}
+func captureLoadHIDCapabilities(ctx context.Context, subscription *capture) error {
+	cause := context.Cause(ctx)
+	if cause != nil {
+		return errors.Join(cause)
+	}
 
-func (c *capture) loadHIDCapabilities(ctx context.Context) error {
-	if err := context.Cause(ctx); err != nil {
-		return err
+	probeErr := findProcedures(hidProcedures())
+	if probeErr != nil {
+		return errors.Join(probeErr)
 	}
-	if err := findProcedures(hidProcedures()); err != nil {
-		return err
-	}
-	data, err := c.readPreparsedData()
+
+	data, err := captureReadPreparsedData(subscription)
 	if err != nil {
-		return err
+		return errors.Join(err)
 	}
-	return c.buildHIDCapabilities(data)
+
+	return errors.Join(captureBuildHIDCapabilities(subscription, data))
 }
 
-func (c *capture) buildHIDCapabilities(data []byte) error {
+func captureBuildHIDCapabilities(subscription *capture, data []byte) error {
 	builder, err := makeHIDBuilder(data)
 	if err != nil {
-		return err
+		return errors.Join(err)
 	}
-	if err := builder.loadControls(); err != nil {
-		return err
+
+	controlsErr := hidBuilderLoadControls(builder)
+	if controlsErr != nil {
+		return errors.Join(controlsErr)
 	}
-	c.commitHID(builder)
+
+	captureCommitHID(subscription, builder)
+
 	return nil
 }
 
@@ -1237,157 +1369,119 @@ func hidProcedures() []*native.Proc {
 	}
 }
 
-func (c *capture) readPreparsedData() ([]byte, error) {
+func captureReadPreparsedData(subscription *capture) ([]byte, error) {
 	var size uint32
+
 	command := input.RAW_INPUT_DEVICE_INFO_COMMAND(preparsedDataCommand)
-	if err := resultError(
-		rawDeviceInfo(c.device.handle, command, nativeBuffer{nil, &size}),
-	); err != nil {
-		return nil, err
+
+	queryErr := resultError(
+		rawDeviceInfo(subscription.device.handle, command, nativeBuffer{nil, &size}),
+	)
+	if queryErr != nil {
+		return nil, errors.Join(queryErr)
 	}
+
 	if size == noValue || size > maxNativeBuffer {
 		return nil, domain.ErrUnsupported
 	}
-	return c.readPreparsedBuffer(size)
+
+	result, err := captureReadPreparsedBuffer(subscription, size)
+
+	return result, errors.Join(err)
 }
 
-func (c *capture) readPreparsedBuffer(size uint32) ([]byte, error) {
-	data := make([]byte, size)
-	err := resultError(rawDeviceInfo(c.device.handle, preparsedDataCommand,
-		nativeBuffer{unsafe.Pointer(&data[noValue]), &size}))
+func captureReadPreparsedBuffer(subscription *capture, size uint32) ([]byte, error) {
+	data := allocateBuffer[byte](int(size))
+
+	err := resultError(rawDeviceInfo(subscription.device.handle, preparsedDataCommand,
+		nativeBuffer{nativePointer(&data[noValue]), &size}))
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err)
 	}
-	return trimPreparsedData(data, size)
+
+	result, err := trimPreparsedData(data, size)
+
+	return result, errors.Join(err)
 }
 
 func trimPreparsedData(data []byte, size uint32) ([]byte, error) {
-	if size > uint32(len(data)) {
+	if uint64(size) > uint64(len(data)) {
 		return nil, domain.ErrEventLoss
 	}
+
 	if size == noValue {
 		return nil, domain.ErrUnsupported
 	}
+
 	return data[:size], nil
 }
 
 func makeHIDBuilder(data []byte) (*hidBuilder, error) {
-	pp := hid.PHIDP_PREPARSED_DATA(uintptr(unsafe.Pointer(&data[noValue])))
+	preparsedAddress := hid.PHIDP_PREPARSED_DATA(uintptr(nativePointer(&data[noValue])))
 	defer runtime.KeepAlive(data)
+
 	var caps hid.HIDP_CAPS
-	if status := hid.HidP_GetCaps(pp, &caps); status != hid.HIDP_STATUS_SUCCESS {
-		return nil, hidError("HidP_GetCaps", status)
+
+	if status := hid.HidP_GetCaps(preparsedAddress, &caps); status != hid.HIDP_STATUS_SUCCESS {
+		return nil, errors.Join(hidError("HidP_GetCaps", status))
 	}
+
 	desc := &descriptor{
 		preparsed: data, reportLen: caps.InputReportByteLength,
 		controls: make(map[hidIndex]hidControl), reportIDs: make(map[byte]bool),
-		maxData: hid.HidP_MaxDataListLength(hid.HidP_Input, pp),
+		maxData: hid.HidP_MaxDataListLength(hid.HidP_Input, preparsedAddress),
 	}
 	if desc.maxData > maxDevices || desc.reportLen == noValue {
 		return nil, domain.ErrUnsupported
 	}
-	return &hidBuilder{descriptor: desc, caps: caps}, nil
+
+	return &hidBuilder{descriptor: desc, caps: caps, controls: nil, nativeControls: nil}, nil
 }
 
-func (builder *hidBuilder) preparsedPointer() hid.PHIDP_PREPARSED_DATA {
-	return hid.PHIDP_PREPARSED_DATA(uintptr(unsafe.Pointer(&builder.descriptor.preparsed[noValue])))
+func hidBuilderPreparsedPointer(builder *hidBuilder) hid.PHIDP_PREPARSED_DATA {
+	return hid.PHIDP_PREPARSED_DATA(uintptr(nativePointer(&builder.descriptor.preparsed[noValue])))
 }
 
-func (builder *hidBuilder) loadControls() error {
+func hidBuilderLoadControls(builder *hidBuilder) error {
 	defer runtime.KeepAlive(builder.descriptor.preparsed)
-	if err := builder.loadButtons(); err != nil {
-		return err
+
+	buttonsErr := hidBuilderLoadButtons(builder)
+	if buttonsErr != nil {
+		return errors.Join(buttonsErr)
 	}
-	return builder.loadValues()
+
+	return errors.Join(hidBuilderLoadValues(builder))
 }
 
-func (builder *hidBuilder) add(control hidControl) {
-	key := hidIndex{control.native.ReportID, control.native.DataIndex}
+func hidBuilderAdd(builder *hidBuilder, control *hidControl) {
+	key := hidDataIndex(control.native.ReportID, control.native.DataIndex)
 	if _, exists := builder.descriptor.controls[key]; exists {
 		return
 	}
-	builder.descriptor.controls[key] = control
-	builder.descriptor.reportIDs[key.report] = true
+
+	builder.descriptor.controls[key] = *control
+	builder.descriptor.reportIDs[control.native.ReportID] = true
 	builder.controls = append(builder.controls, control.control)
 	builder.nativeControls = append(builder.nativeControls, control.native)
 }
 
-func (builder *hidBuilder) loadButtons() error {
-	buttons, err := builder.readButtonCaps()
-	if err != nil {
-		return err
-	}
-	for _, capability := range buttons {
-		if err := builder.addButtonCapability(capability); err != nil {
-			return err
-		}
-	}
-	return nil
+func hidBuilderLoadButtons(builder *hidBuilder) error {
+	args := makeCapabilityAdapter(hid.HidP_GetButtonCaps, projectButtonCapability, makeHIDButton)
+
+	return errors.Join(loadNativeCapabilitySet(builder, builder.caps.NumberInputButtonCaps, args))
 }
 
-func (builder *hidBuilder) readButtonCaps() ([]hid.HIDP_BUTTON_CAPS, error) {
-	count := builder.caps.NumberInputButtonCaps
-	if count == noValue {
-		return nil, nil
-	}
-	buttons := make([]hid.HIDP_BUTTON_CAPS, count)
-	status := hid.HidP_GetButtonCaps(
-		hid.HidP_Input,
-		&buttons[noValue],
-		&count,
-		builder.preparsedPointer(),
-	)
-	if status != hid.HIDP_STATUS_SUCCESS {
-		return nil, hidError("HidP_GetButtonCaps", status)
-	}
-	if int(count) > len(buttons) {
-		return nil, domain.ErrEventLoss
-	}
-	return buttons[:count], nil
+func projectButtonCapability(value *hid.HIDP_BUTTON_CAPS) *nativeCapability {
+	return makeNativeCapability(value.Anonymous.Data, value.IsRange, value.IsAlias)
 }
 
-func (builder *hidBuilder) addButtonCapability(button hid.HIDP_BUTTON_CAPS) error {
-	if button.IsAlias != noValue {
-		return nil
-	}
-	span, err := capRange(button.Anonymous.Data, button.IsRange)
-	if err != nil {
-		return err
-	}
-	for usage, index := span.firstUsage, span.firstIndex; usage <= span.lastUsage; usage, index =
-		usage+singleValue, index+singleValue {
-		builder.add(makeHIDButton(button, usage, index))
-	}
-	return nil
-}
+func makeHIDButton(button *hid.HIDP_BUTTON_CAPS, usage, dataIndex uint32) hidControl {
+	id := hidID(button.ReportID, button.LinkCollection, uint16(dataIndex&wordMask))
 
-func makeHIDButton(button hid.HIDP_BUTTON_CAPS, usage, dataIndex uint32) hidControl {
-	id := hidID(button.ReportID, button.LinkCollection, uint16(dataIndex))
-	kind := buttonKind(button.UsagePage)
-	support := buttonSupport(button.IsAbsolute)
 	return hidControl{
-		button: true,
-		control: domain.Control{
-			Mode:    domain.AxisUnknown,
-			ID:      id,
-			Name:    fmt.Sprintf(hidNameFormat, button.UsagePage, usage),
-			Kind:    kind,
-			Usage:   domain.HID(button.UsagePage, uint16(usage)),
-			Mapping: domain.MappingReported,
-			Range:   &domain.Range{Min: noValue, Max: singleValue},
-			Unit:    domain.UnitBoolean,
-			Support: support,
-		},
-		native: ext.NativeControl{
-			ID:             string(id),
-			ReportID:       button.ReportID,
-			DataIndex:      uint16(dataIndex),
-			LinkCollection: button.LinkCollection,
-			ReportCount:    button.ReportCount,
-			BitSize:        singleValue,
-			Bounds:         ext.DescriptorBounds{LogicalMin: noValue, LogicalMax: singleValue},
-			Absolute:       button.IsAbsolute != noValue,
-		},
+		button:  true,
+		control: makeHIDButtonDescriptor(button, usage, id),
+		native:  makeHIDButtonNative(button, dataIndex, id), hat: false,
 	}
 }
 
@@ -1395,6 +1489,7 @@ func buttonKind(page uint16) domain.ControlKind {
 	if page == seventhValue || page == twelfthValue {
 		return domain.ControlKey
 	}
+
 	return domain.ControlButton
 }
 
@@ -1402,154 +1497,67 @@ func buttonSupport(absolute foundation.BOOLEAN) domain.Support {
 	if absolute == noValue {
 		return domain.SupportUnsupported
 	}
+
 	return domain.SupportSupported
 }
 
-func (builder *hidBuilder) loadValues() error {
-	values, err := builder.readValueCaps()
-	if err != nil {
-		return err
-	}
-	for _, capability := range values {
-		if err := builder.addValueCapability(capability); err != nil {
-			return err
-		}
-	}
-	return nil
+func hidBuilderLoadValues(builder *hidBuilder) error {
+	args := makeCapabilityAdapter(hid.HidP_GetValueCaps, projectValueCapability, makeHIDValue)
+
+	return errors.Join(loadNativeCapabilitySet(builder, builder.caps.NumberInputValueCaps, args))
 }
 
-func (builder *hidBuilder) readValueCaps() ([]hid.HIDP_VALUE_CAPS, error) {
-	count := builder.caps.NumberInputValueCaps
-	if count == noValue {
-		return nil, nil
-	}
-	values := make([]hid.HIDP_VALUE_CAPS, count)
-	status := hid.HidP_GetValueCaps(
-		hid.HidP_Input,
-		&values[noValue],
-		&count,
-		builder.preparsedPointer(),
-	)
-	if status != hid.HIDP_STATUS_SUCCESS {
-		return nil, hidError("HidP_GetValueCaps", status)
-	}
-	if int(count) > len(values) {
-		return nil, domain.ErrEventLoss
-	}
-	return values[:count], nil
+func projectValueCapability(value *hid.HIDP_VALUE_CAPS) *nativeCapability {
+	return makeNativeCapability(value.Anonymous.Data, value.IsRange, value.IsAlias)
 }
 
-func (builder *hidBuilder) addValueCapability(value hid.HIDP_VALUE_CAPS) error {
-	if value.IsAlias != noValue {
-		return nil
-	}
-	span, err := capRange(value.Anonymous.Data, value.IsRange)
-	if err != nil {
-		return err
-	}
-	for usage, index := span.firstUsage, span.firstIndex; usage <= span.lastUsage; usage, index =
-		usage+singleValue, index+singleValue {
-		builder.add(makeHIDValue(value, usage, index))
-	}
-	return nil
-}
-
-func makeHIDValue(value hid.HIDP_VALUE_CAPS, usage, dataIndex uint32) hidControl {
+func makeHIDValue(value *hid.HIDP_VALUE_CAPS, usage, dataIndex uint32) hidControl {
 	bounds := logicalBounds(value.LogicalMin, value.LogicalMax)
-	id := hidID(value.ReportID, value.LinkCollection, uint16(dataIndex))
-	ctrl := domain.Control{
-		Mode: domain.AxisUnknown,
-		ID:   id,
-		Name: fmt.Sprintf(hidNameFormat, value.UsagePage, usage),
-		Kind: domain.ControlAxis,
-		Usage: domain.HID(
-			value.UsagePage,
-			uint16(usage),
-		),
-		Mapping: domain.MappingReported,
-		Unit:    domain.UnitLogical,
-		Support: domain.SupportSupported,
-	}
+	id := hidID(value.ReportID, value.LinkCollection, uint16(dataIndex&wordMask))
+	ctrl := makeHIDValueDescriptor(value, usage, id)
 	classifyValue(&ctrl, value, bounds)
+
 	normalHat := isConventionalHat(value, usage, bounds)
 	classifyHat(&ctrl, value, usage)
 
-	return hidControl{control: ctrl, hat: normalHat, native: ext.NativeControl{
-		ID:             string(id),
-		ReportID:       value.ReportID,
-		DataIndex:      uint16(dataIndex),
-		LinkCollection: value.LinkCollection,
-		BitSize:        value.BitSize,
-		ReportCount:    value.ReportCount,
-		Bounds: ext.DescriptorBounds{
-			LogicalMin: value.LogicalMin, LogicalMax: value.LogicalMax,
-			PhysicalMin: value.PhysicalMin, PhysicalMax: value.PhysicalMax,
-		},
-		Units:         value.Units,
-		UnitsExponent: value.UnitsExp,
-		HasNull:       value.HasNull != noValue,
-		Absolute:      value.IsAbsolute != noValue,
-	}}
-}
-
-func logicalBounds(minimum, maximum int32) domain.Range {
-	bounds := domain.Range{Min: int64(minimum), Max: int64(maximum)}
-	if minimum >= noValue && maximum < noValue {
-		bounds.Max = int64(uint32(maximum))
+	return hidControl{
+		control: ctrl,
+		hat:     normalHat,
+		native:  makeHIDValueNative(value, dataIndex, id),
+		button:  false,
 	}
-	return bounds
 }
 
-func (c *capture) commitHID(builder *hidBuilder) {
-	slices.SortFunc(builder.controls, compareControls)
-	slices.SortFunc(builder.nativeControls, compareNativeControls)
-	c.hid = builder.descriptor
-	c.caps = domain.Capabilities{
+func captureCommitHID(subscription *capture, builder *hidBuilder) {
+	slices.SortFunc(builder.controls,
+
+		func(left, owner domain.Control) int { return cmp.Compare(left.ID, owner.ID) })
+	slices.SortFunc(builder.nativeControls,
+
+		func(
+			left, owner ext.NativeControl,
+		) int {
+			return cmp.Compare(left.ID, owner.ID)
+		})
+
+	subscription.hid = builder.descriptor
+	subscription.caps = domain.Capabilities{
 		Controls: builder.controls,
 		Complete: true,
 		Repeat:   domain.SupportUnsupported,
 	}
-	c.native.Controls = builder.nativeControls
+	subscription.native.Controls = builder.nativeControls
 }
 
-func compareControls(a, b domain.Control) int { return cmp.Compare(a.ID, b.ID) }
+func captureRetryMetadata(
+	ctx context.Context, subscription *capture,
 
-func compareNativeControls(a, b ext.NativeControl) int { return cmp.Compare(a.ID, b.ID) }
-
-func (c *capture) retryMetadata(ctx context.Context, op func(context.Context) error) error {
-	if c.backend.retrier == nil {
-		return op(ctx)
-	}
-	return c.backend.retrier.Do(ctx, op, transient)
+	operation func(context.Context) error,
+) error {
+	return errors.Join(subscription.backend.retry(ctx, operation))
 }
 
-func hidID(report byte, collection, index uint16) domain.ControlID {
-	return domain.ControlID(fmt.Sprintf("hid:%02x:%04x:%04x", report, collection, index))
-}
-
-func capRange(words [eighthValue]uint16, rangeKind foundation.BOOLEAN) (capabilityRange, error) {
-	span := capabilityRange{
-		firstUsage: uint32(words[noValue]), lastUsage: uint32(words[noValue]),
-		firstIndex: uint32(words[sixthValue]), lastIndex: uint32(words[sixthValue]),
-	}
-	if rangeKind != noValue {
-		span.lastUsage, span.lastIndex = uint32(words[singleValue]), uint32(words[seventhValue])
-	}
-	if !span.valid() {
-		return capabilityRange{}, errors.Join(
-			domain.ErrUnsupported,
-			errors.New("invalid HID capability range"),
-		)
-	}
-	return span, nil
-}
-
-func (span capabilityRange) valid() bool {
-	return span.lastUsage >= span.firstUsage && span.lastIndex >= span.firstIndex &&
-		span.lastUsage-span.firstUsage == span.lastIndex-span.firstIndex
-}
-
-func conventionalHat(value hid.HIDP_VALUE_CAPS, minValue, maxValue int64) bool {
+func conventionalHat(value *hid.HIDP_VALUE_CAPS, minValue, maxValue int64) bool {
 	direction, ok := domain.Hat(
 		minValue,
 		domain.Range{Min: minValue, Max: maxValue},
@@ -1558,11 +1566,12 @@ func conventionalHat(value hid.HIDP_VALUE_CAPS, minValue, maxValue int64) bool {
 	if !ok || direction != domain.HatNorth {
 		return false
 	}
+
 	return conventionalHatUnits(value) &&
 		conventionalHatExtent(value.PhysicalMax, maxValue-minValue+singleValue)
 }
 
-func conventionalHatUnits(value hid.HIDP_VALUE_CAPS) bool {
+func conventionalHatUnits(value *hid.HIDP_VALUE_CAPS) bool {
 	return value.PhysicalMin == noValue &&
 		(value.Units == noValue || value.Units == angularUnits) &&
 		value.UnitsExp == noValue
@@ -1573,542 +1582,1196 @@ func conventionalHatExtent(maximum int32, positions int64) bool {
 		(positions == eighthValue && maximum == compassExtent)
 }
 
-func hidError(op string, status foundation.NTSTATUS) error {
-	return fmt.Errorf("%s: %w (HID status 0x%08x)", op, domain.ErrUnsupported, uint32(status))
+func hidError(operation string, status foundation.NTSTATUS) error {
+	return fmt.Errorf(
+		"%s: %w (HID status 0x%08x)",
+		operation,
+		domain.ErrUnsupported,
+		unsignedWord(int32(status)),
+	)
 }
 
-func (b *backend) readInput(handle input.HRAWINPUT) {
+func backendReadInput(owner *backend, handle input.HRAWINPUT) {
 	data, err := readInputData(handle)
 	if err != nil {
-		b.failAll(err)
+		backendFailAll(owner, err)
+
 		return
 	}
+
 	packet, err := decodeInputPacket(data)
 	if err != nil {
-		b.failAll(err)
+		backendFailAll(owner, err)
+
 		return
 	}
-	for c := range b.captures[packet.device] {
-		c.handlePacket(packet)
+
+	for subscription := range owner.captures[foundation.HANDLE(packet.device)] {
+		captureHandlePacket(subscription, &packet)
 	}
 }
 
 func rawInputData(handle input.HRAWINPUT, buffer nativeBuffer) (uint32, error) {
-	ret, _, errno := syscall.SyscallN(
-		input.Procs.GetRawInputData.Addr(),
-		uintptr(handle),
-		inputDataCommand,
-		uintptr(
-			buffer.data,
-		),
-		uintptr(unsafe.Pointer(buffer.size)),
-		uintptr(unsafe.Sizeof(input.RAWINPUTHEADER{})),
-	)
-	if uint32(ret) == infiniteWait {
-		return noValue, errors.Join(domain.ErrEventLoss, native.LastError(errno))
+	result := input.GetRawInputData(handle, input.RAW_INPUT_DATA_COMMAND_FLAGS(inputDataCommand),
+		buffer.data, buffer.size, nativeSize[input.RAWINPUTHEADER]())
+	if result == infiniteWait {
+		return noValue, errors.Join(domain.ErrEventLoss, syscall.GetLastError())
 	}
-	return uint32(ret), nil
+
+	return result, nil
 }
 
 func readInputData(handle input.HRAWINPUT) ([]byte, error) {
 	var size uint32
-	if err := resultError(rawInputData(handle, nativeBuffer{nil, &size})); err != nil {
-		return nil, err
+
+	queryErr := resultError(rawInputData(handle, nativeBuffer{nil, &size}))
+	if queryErr != nil {
+		return nil, errors.Join(queryErr)
 	}
-	headerSize := uint32(unsafe.Sizeof(input.RAWINPUTHEADER{}))
+
+	headerSize := nativeSize[input.RAWINPUTHEADER]()
 	if size < headerSize || size > maxNativeBuffer {
 		return nil, domain.ErrEventLoss
 	}
-	return readInputBuffer(handle, size)
+
+	result, err := readInputBuffer(handle, size)
+
+	return result, errors.Join(err)
 }
 
 func readInputBuffer(handle input.HRAWINPUT, size uint32) ([]byte, error) {
-	data := make([]byte, size)
-	n, err := rawInputData(handle, nativeBuffer{unsafe.Pointer(&data[noValue]), &size})
+	data := allocateBuffer[byte](int(size))
+
+	written, err := rawInputData(handle, nativeBuffer{nativePointer(&data[noValue]), &size})
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err)
 	}
-	headerSize := uint32(unsafe.Sizeof(input.RAWINPUTHEADER{}))
-	if n < headerSize || uint64(n) > uint64(len(data)) {
+
+	headerSize := nativeSize[input.RAWINPUTHEADER]()
+	if written < headerSize || uint64(written) > uint64(len(data)) {
 		return nil, domain.ErrEventLoss
 	}
-	return data[:n], nil
+
+	return data[:written], nil
 }
 
-func decodeInputPacket(data []byte) (inputPacket, error) {
-	headerSize := uint32(unsafe.Sizeof(input.RAWINPUTHEADER{}))
-	declared := binary.LittleEndian.Uint32(data[fourthValue:])
-	if declared < headerSize || uint64(declared) > uint64(len(data)) {
-		return inputPacket{}, domain.ErrEventLoss
-	}
-	now := time.Now()
-	return inputPacket{
-		kind:   binary.LittleEndian.Uint32(data),
-		device: foundation.HANDLE(binary.LittleEndian.Uint64(data[eighthValue:])),
-		body:   data[headerSize:declared],
-		stamp:  domain.Timestamp{Time: now.UTC(), ReceivedAt: now, Source: domain.TimestampReceipt},
-	}, nil
-}
-
-func (c *capture) handlePacket(packet inputPacket) {
-	if c.closed.Load() {
+func captureHandlePacket(subscription *capture, packet *inputPacket) {
+	if subscription.closed.Load() {
 		return
 	}
-	if packet.kind != c.device.kind {
-		c.fail(domain.ErrEventLoss)
+
+	if packet.kind != subscription.device.kind {
+		captureFail(subscription, domain.ErrEventLoss)
+
 		return
 	}
-	c.dispatchInput(packet)
+
+	captureDispatchInput(subscription, packet)
 }
 
-func (c *capture) dispatchInput(packet inputPacket) {
+func captureDispatchInput(subscription *capture, packet *inputPacket) {
 	switch packet.kind {
 	case singleValue:
-		c.keyboard(packet.body, packet.stamp)
+		captureKeyboard(subscription, packet.body, &packet.stamp)
 	case noValue:
-		c.mouse(packet.body, packet.stamp)
+		captureMouse(subscription, packet.body, &packet.stamp)
 	case secondValue:
-		c.reports(packet.body, packet.stamp)
+		captureReports(subscription, packet.body, &packet.stamp)
 	default:
-		c.fail(domain.ErrEventLoss)
+		captureFail(subscription, domain.ErrEventLoss)
 	}
 }
 
-func (b *backend) failAll(err error) {
-	for _, group := range b.captures {
-		for c := range group {
-			c.fail(err)
+func backendFailAll(owner *backend, err error) {
+	for entryIndex := range owner.captures {
+		group := owner.captures[entryIndex]
+		for subscription := range group {
+			captureFail(subscription, err)
 		}
 	}
 }
 
-func (c *capture) fail(err error) {
-	if !c.closed.Swap(true) {
-		c.sink.Fail(err)
+func captureFail(subscription *capture, err error) {
+	if !subscription.closed.Swap(true) {
+		subscription.sink.Fail(err)
 	}
 }
 
-func (c *capture) emit(event domain.Event) {
-	event.DeviceID = c.info.ID
-	if !c.closed.Load() && !c.sink.Publish(&event) {
-		c.closed.Store(true)
+func captureEmit(subscription *capture, event *domain.Event) {
+	event.DeviceID = subscription.info.ID
+	if !subscription.closed.Load() && !subscription.sink.Publish(event) {
+		subscription.closed.Store(true)
 	}
 }
 
-func (c *capture) keyboard(data []byte, stamp domain.Timestamp) {
+func captureKeyboard(subscription *capture, data []byte, stamp *domain.Timestamp) {
 	if len(data) < sixteenthValue {
-		c.fail(domain.ErrEventLoss)
+		captureFail(subscription, domain.ErrEventLoss)
+
 		return
 	}
-	key := keyboardInput{
-		makeCode:   binary.LittleEndian.Uint16(data),
-		flags:      binary.LittleEndian.Uint16(data[secondValue:]),
-		virtualKey: binary.LittleEndian.Uint16(data[sixthValue:]),
-	}
+
+	key := decodeKeyboard(data)
 	if key.makeCode == byteMask {
-		c.fail(domain.ErrEventLoss)
+		captureFail(subscription, domain.ErrEventLoss)
+
 		return
 	}
-	if key.ignored() {
+
+	if keyboardInputIgnored(key) {
 		return
 	}
-	c.emitKey(key, stamp)
+
+	captureEmitKey(subscription, key, stamp)
 }
 
-func (key keyboardInput) scanCode() uint16 {
-	scan := key.makeCode
-	if key.flags&secondValue != noValue {
-		scan |= scanPrefixE0
-	} else if key.flags&fourthValue != noValue {
-		scan |= scanPrefixE1
+func captureEmitKey(subscription *capture, key keyboardInput, stamp *domain.Timestamp) {
+	id := keyboardInputIdentity(key, subscription.backend.tables)
+	action, value := updateKeyState(subscription, key, id)
+	event := domain.Event{
+		DeviceID:  emptyString,
+		ControlID: id,
+		Action:    action,
+		Value:     value,
+		Timestamp: *stamp,
 	}
-	return scan
+	captureEmit(subscription, &event)
 }
 
-func (key keyboardInput) ignored() bool {
-	if key.virtualKey >= byteMask {
-		return true
-	}
-	switch key.scanCode() {
-	case scanPrintScreenPrefix, scanPrintScreenSuffix, scanPausePrefix:
-		return true
-	default:
-		return false
-	}
-}
-
-func (key keyboardInput) identity() domain.ControlID {
-	scan := key.scanCode()
-	if key.makeCode == noValue && !knownScan(scan) {
-		scan = virtualScanPrefix | key.virtualKey
-	}
-	return keyID(key.usage(), scan)
-}
-
-func knownScan(scan uint16) bool {
-	_, keyboard := scanUsages[scan]
-	_, consumer := consumerScans[scan]
-	return keyboard || consumer
-}
-
-func (key keyboardInput) usage() domain.Usage {
-	scan := key.scanCode()
-	if code, ok := scanUsages[scan]; ok {
-		return domain.HID(seventhValue, code)
-	}
-	if code, ok := consumerScans[scan]; ok {
-		return domain.HID(twelfthValue, code)
-	}
-	if key.makeCode == noValue {
-		return virtualKeyUsage(key.virtualKey)
-	}
-	return systemScanUsage(scan)
-}
-
-func virtualKeyUsage(key uint16) domain.Usage {
-	if code, ok := consumerVirtualKeys[key]; ok {
-		return domain.HID(twelfthValue, code)
-	}
-	return noValue
-}
-
-func systemScanUsage(scan uint16) domain.Usage {
-	switch scan {
-	case scanPower:
-		return domain.HID(singleValue, systemPowerUsage)
-	case scanSleep:
-		return domain.HID(singleValue, systemSleepUsage)
-	case scanWake:
-		return domain.HID(singleValue, systemWakeUsage)
-	default:
-		return noValue
-	}
-}
-
-func (c *capture) emitKey(key keyboardInput, stamp domain.Timestamp) {
-	id := key.identity()
-	if key.flags&singleValue != noValue {
-		delete(c.held, id)
-		c.emit(
-			domain.Event{
-				ControlID: id,
-				Action:    domain.ActionRelease,
-				Value:     noValue,
-				Timestamp: stamp,
-			},
-		)
-		return
-	}
-	action := domain.ActionPress
-	if c.held[id] {
-		action = domain.ActionRepeat
-	}
-	c.held[id] = true
-	c.emit(domain.Event{ControlID: id, Action: action, Value: singleValue, Timestamp: stamp})
-}
-
-func (c *capture) mouse(data []byte, stamp domain.Timestamp) {
+func captureMouse(subscription *capture, data []byte, stamp *domain.Timestamp) {
 	if len(data) < mousePacketBytes {
-		c.fail(domain.ErrEventLoss)
+		captureFail(subscription, domain.ErrEventLoss)
+
 		return
 	}
+
 	mouse := mouseInput{
 		flags:   binary.LittleEndian.Uint16(data),
 		buttons: binary.LittleEndian.Uint16(data[fourthValue:]),
-		wheel:   int16(binary.LittleEndian.Uint16(data[sixthValue:])),
-		x:       int64(int32(binary.LittleEndian.Uint32(data[twelfthValue:]))),
-		y:       int64(int32(binary.LittleEndian.Uint32(data[sixteenthValue:]))), stamp: stamp,
+		wheel:   signedHalf(binary.LittleEndian.Uint16(data[sixthValue:])),
+		x:       signedWord(binary.LittleEndian.Uint32(data[twelfthValue:])),
+		y:       signedWord(binary.LittleEndian.Uint32(data[sixteenthValue:])), stamp: *stamp,
 	}
-	c.mouseButtons(mouse)
-	c.mouseAxes(mouse)
-	c.mouseWheels(mouse)
+	captureMouseButtons(subscription, &mouse)
+	captureMouseAxes(subscription, &mouse)
+	captureMouseWheels(subscription, &mouse)
 }
 
-func (c *capture) mouseButtons(mouse mouseInput) {
-	for i := uint16(noValue); i < fifthValue; i++ {
-		id := domain.ControlID(fmt.Sprintf(buttonIDFormat, i+singleValue))
-		if mouse.buttons&(singleValue<<(i*secondValue)) != noValue {
-			c.emit(
-				domain.Event{
-					ControlID: id,
-					Action:    domain.ActionPress,
-					Value:     singleValue,
-					Timestamp: mouse.stamp,
-				},
-			)
-		}
-		if mouse.buttons&(singleValue<<(i*secondValue+singleValue)) != noValue {
-			c.emit(
-				domain.Event{
-					ControlID: id,
-					Action:    domain.ActionRelease,
-					Value:     noValue,
-					Timestamp: mouse.stamp,
-				},
-			)
-		}
+func captureMouseButtons(subscription *capture, mouse *mouseInput) {
+	for index := range uint16(fifthValue) {
+		id := domain.ControlID(fmt.Sprintf(buttonIDFormat, index+singleValue))
+		flags := mouse.buttons >> (index * secondValue)
+		emitMouseButton(subscription, mouse, &mouseButtonArguments{id: id, flags: flags})
 	}
 }
 
-func (c *capture) mouseAxes(mouse mouseInput) {
+func captureMouseAxes(subscription *capture, mouse *mouseInput) {
+	emit := captureRelativeAxis
+	prefix := relativeAxisPrefix
+
 	if mouse.flags&singleValue != noValue {
-		c.absoluteAxis("abs:x", mouse.x, mouse.stamp)
-		c.absoluteAxis("abs:y", mouse.y, mouse.stamp)
-		return
+		emit = emitAbsoluteCoordinate
+		prefix = absoluteAxisPrefix
 	}
-	c.relativeAxis("rel:x", mouse.x, mouse.stamp)
-	c.relativeAxis("rel:y", mouse.y, mouse.stamp)
-}
 
-func (c *capture) absoluteAxis(id domain.ControlID, value int64, stamp domain.Timestamp) {
-	if previous, exists := c.values[id]; exists && previous == value {
-		return
-	}
-	c.values[id] = value
-	c.emit(
-		domain.Event{
-			ControlID: id,
-			Action:    domain.ActionChange,
-			Value:     float64(value),
-			Timestamp: stamp,
-		},
+	emit(
+		subscription,
+		domain.ControlID(prefix+axisX),
+		&captureRelativeAxisArguments{value: mouse.x, stamp: &mouse.stamp},
+	)
+	emit(
+		subscription,
+		domain.ControlID(prefix+axisY),
+		&captureRelativeAxisArguments{value: mouse.y, stamp: &mouse.stamp},
 	)
 }
 
-func (c *capture) relativeAxis(id domain.ControlID, value int64, stamp domain.Timestamp) {
+func captureAbsoluteAxis(subscription *capture,
+	id domain.ControlID, args *captureAbsoluteAxisArguments,
+) {
+	value, stamp := args.value, args.stamp
+	if previous, exists := subscription.values[id]; exists && previous == value {
+		return
+	}
+
+	subscription.values[id] = value
+	captureEmit(subscription, &domain.Event{
+		ControlID: id,
+		Action:    domain.ActionChange,
+		Value:     float64(value),
+		Timestamp: *stamp, DeviceID: emptyString,
+	},
+	)
+}
+
+func captureRelativeAxis(subscription *capture,
+	id domain.ControlID, args *captureRelativeAxisArguments,
+) {
+	value, stamp := args.value, args.stamp
 	if value != noValue {
-		c.emit(
-			domain.Event{
-				ControlID: id,
-				Action:    domain.ActionChange,
-				Value:     float64(value),
-				Timestamp: stamp,
-			},
+		captureEmit(subscription, &domain.Event{
+			ControlID: id,
+			Action:    domain.ActionChange,
+			Value:     float64(value),
+			Timestamp: *stamp, DeviceID: emptyString,
+		},
 		)
 	}
 }
 
-func (c *capture) mouseWheels(mouse mouseInput) {
+func captureMouseWheels(subscription *capture, mouse *mouseInput) {
 	if mouse.buttons&mouseVerticalWheel != noValue {
-		c.emit(domain.Event{
+		captureEmit(subscription, &domain.Event{
 			ControlID: wheelControlID, Action: domain.ActionChange,
-			Value: float64(mouse.wheel) / wheelDelta, Timestamp: mouse.stamp,
+			Value: float64(mouse.wheel) / wheelDelta, Timestamp: mouse.stamp, DeviceID: emptyString,
 		})
 	}
+
 	if mouse.buttons&mouseHorizontalWheel != noValue {
-		c.emit(domain.Event{
+		captureEmit(subscription, &domain.Event{
 			ControlID: panControlID, Action: domain.ActionChange,
-			Value: float64(mouse.wheel) / wheelDelta, Timestamp: mouse.stamp,
+			Value: float64(mouse.wheel) / wheelDelta, Timestamp: mouse.stamp, DeviceID: emptyString,
 		})
 	}
 }
 
-func (c *capture) reports(body []byte, stamp domain.Timestamp) {
-	if c.hid == nil || len(body) < eighthValue {
-		c.fail(domain.ErrEventLoss)
+func captureReports(subscription *capture, body []byte, stamp *domain.Timestamp) {
+	if subscription.hid == nil || len(body) < eighthValue {
+		captureFail(subscription, domain.ErrEventLoss)
+
 		return
 	}
+
 	size, count := binary.LittleEndian.Uint32(body), binary.LittleEndian.Uint32(body[fourthValue:])
 	if !validReportBatch(body, size, count) {
-		c.fail(domain.ErrEventLoss)
+		captureFail(subscription, domain.ErrEventLoss)
+
 		return
 	}
-	c.reportBatch(body, reportBatch{size: size, count: count, stamp: stamp})
+
+	captureReportBatch(subscription, body, &reportBatch{size: size, count: count, stamp: *stamp})
 }
 
-func validReportBatch(body []byte, size, count uint32) bool {
-	return size != noValue && count <= maxDevices &&
-		uint64(size)*uint64(count) <= uint64(len(body)-eighthValue)
-}
-
-func (c *capture) reportBatch(body []byte, batch reportBatch) {
-	for i := uint32(noValue); i < batch.count && !c.closed.Load(); i++ {
-		start := eighthValue + uint64(i)*uint64(batch.size)
-		c.report(body[start:start+uint64(batch.size)], batch.stamp)
+func captureReportBatch(subscription *capture, body []byte, batch *reportBatch) {
+	for index := uint32(noValue); index < batch.count && !subscription.closed.Load(); index++ {
+		start := eighthValue + uint64(index)*uint64(batch.size)
+		captureReport(subscription, body[start:start+uint64(batch.size)], &batch.stamp)
 	}
 }
 
-func (c *capture) report(report []byte, stamp domain.Timestamp) {
-	if len(report) != int(c.hid.reportLen) || len(report) == noValue {
-		c.fail(errors.Join(domain.ErrEventLoss, errors.New("unexpected HID report length")))
+func captureReport(subscription *capture, report []byte, stamp *domain.Timestamp) {
+	if len(report) != int(subscription.hid.reportLen) || len(report) == noValue {
+		captureFail(
+			subscription,
+			fmt.Errorf("unexpected HID report length: %w", domain.ErrEventLoss),
+		)
+
 		return
 	}
+
 	reportID := report[noValue]
-	if !c.hid.reportIDs[reportID] || c.hid.maxData == noValue {
+	if !subscription.hid.reportIDs[reportID] || subscription.hid.maxData == noValue {
 		return
 	}
-	c.applyHIDReport(report, stamp)
+
+	captureApplyHIDReport(subscription, report, stamp)
 }
 
-func (c *capture) applyHIDReport(report []byte, stamp domain.Timestamp) {
-	data, err := c.readHIDReport(report)
+func captureApplyHIDReport(subscription *capture, report []byte, stamp *domain.Timestamp) {
+	data, err := captureReadHIDReport(subscription, report)
 	if err != nil {
-		c.fail(err)
+		captureFail(subscription, err)
+
 		return
 	}
+
 	state := hidReportState{
 		reportID: report[noValue],
-		stamp:    stamp,
+		stamp:    *stamp,
 		pressed:  make(map[domain.ControlID]bool),
 	}
-	c.processHIDData(data, state)
-	c.updateButtons(state)
+	captureProcessHIDData(subscription, data, &state)
+	captureUpdateButtons(subscription, &state)
 }
 
-func (c *capture) readHIDReport(report []byte) ([]hid.HIDP_DATA, error) {
-	data := make([]hid.HIDP_DATA, c.hid.maxData)
-	count := uint32(len(data))
-	pp := hid.PHIDP_PREPARSED_DATA(uintptr(unsafe.Pointer(&c.hid.preparsed[noValue])))
+func captureReadHIDReport(subscription *capture, report []byte) ([]hid.HIDP_DATA, error) {
+	data := allocateBuffer[hid.HIDP_DATA](int(subscription.hid.maxData))
+	count := subscription.hid.maxData
+	preparsedAddress := descriptorPointer(subscription.hid)
 	status := hid.HidP_GetData(
 		hid.HidP_Input,
 		&data[noValue],
 		&count,
-		pp,
+		preparsedAddress,
 		&report[noValue],
-		uint32(len(report)),
+		uint32(subscription.hid.reportLen),
 	)
-	runtime.KeepAlive(c.hid.preparsed)
+	runtime.KeepAlive(subscription.hid.preparsed)
 	runtime.KeepAlive(report)
-	if status != hid.HIDP_STATUS_SUCCESS || count > uint32(len(data)) {
+
+	if status != hid.HIDP_STATUS_SUCCESS || count > subscription.hid.maxData {
 		return nil, errors.Join(domain.ErrEventLoss, hidError("HidP_GetData", status))
 	}
+
 	return data[:count], nil
 }
 
-func (c *capture) processHIDData(data []hid.HIDP_DATA, state hidReportState) {
-	for _, item := range data {
-		ctrl, found := c.hid.controls[hidIndex{state.reportID, item.DataIndex}]
+func captureProcessHIDData(subscription *capture, data []hid.HIDP_DATA, state *hidReportState) {
+	for entryIndex := range data {
+		item := data[entryIndex]
+		ctrl, found := subscription.hid.controls[hidDataIndex(state.reportID, item.DataIndex)]
+
 		if !found || ctrl.control.Support != domain.SupportSupported {
 			continue
 		}
-		c.processHIDControl(ctrl, item.Anonymous.Data[noValue], state)
+
+		captureProcessHIDControl(
+			subscription,
+			&ctrl,
+			&captureProcessHIDControlArguments{word: item.Anonymous.Data[noValue], state: state},
+		)
 	}
 }
 
-func (c *capture) processHIDControl(ctrl hidControl, word uint32, state hidReportState) {
+func captureProcessHIDControl(
+	subscription *capture,
+	ctrl *hidControl, args *captureProcessHIDControlArguments,
+) {
+	word, state := args.word, args.state
+	if ctrl.button && word&byteMask != noValue {
+		state.pressed[ctrl.control.ID] = true
+	}
+
 	if ctrl.button {
-		if uint8(word) != noValue {
-			state.pressed[ctrl.control.ID] = true
-		}
 		return
 	}
-	value, valid := ctrl.reportValue(word)
+
+	value, valid := hidControlReportValue(ctrl, word)
 	if valid {
-		c.emitHIDValue(ctrl.control, value, state.stamp)
+		captureEmitHIDValue(
+			subscription,
+			&ctrl.control,
+			&captureEmitHIDValueArguments{value: value, stamp: &state.stamp},
+		)
 	}
 }
 
-func (ctrl hidControl) reportValue(word uint32) (int64, bool) {
-	value := logicalValue(word, ctrl.native)
+func hidControlReportValue(ctrl *hidControl, word uint32) (int64, bool) {
+	value := logicalValue(word, &ctrl.native)
 	bounds := logicalBounds(ctrl.native.Bounds.LogicalMin, ctrl.native.Bounds.LogicalMax)
+
 	if ctrl.hat {
 		direction, ok := domain.Hat(value, bounds, ctrl.native.HasNull)
+
 		return int64(direction), ok
 	}
+
 	return value, !ctrl.native.HasNull || (value >= bounds.Min && value <= bounds.Max)
 }
 
-func (c *capture) emitHIDValue(control domain.Control, value int64, stamp domain.Timestamp) {
-	previous, exists := c.values[control.ID]
+func captureEmitHIDValue(subscription *capture,
+	control *domain.Control, args *captureEmitHIDValueArguments,
+) {
+	value, stamp := args.value, args.stamp
+	previous, exists := subscription.values[control.ID]
+
 	if control.Mode != domain.AxisRelative && exists && previous == value {
 		return
 	}
-	c.values[control.ID] = value
-	c.emit(domain.Event{
+
+	subscription.values[control.ID] = value
+	captureEmit(subscription, &domain.Event{
 		ControlID: control.ID, Action: hidValueAction(control.Kind, value),
-		Value: float64(value), Timestamp: stamp,
+		Value: float64(value), Timestamp: *stamp, DeviceID: emptyString,
 	})
 }
 
-func hidValueAction(kind domain.ControlKind, value int64) domain.EventAction {
-	if kind != domain.ControlSwitch {
-		return domain.ActionChange
-	}
-	if value != noValue {
-		return domain.ActionPress
-	}
-	return domain.ActionRelease
+func captureUpdateButtons(subscription *capture, state *hidReportState) {
+	previous := subscription.buttons[state.reportID]
+	event := makeButtonEvent(state)
+	captureEmitButtonChanges(
+		subscription,
+		state.pressed,
+		&buttonChangesArguments{previous: previous, event: &event},
+	)
+
+	event.Action, event.Value = domain.ActionRelease, noValue
+	captureEmitButtonChanges(
+		subscription,
+		previous,
+		&buttonChangesArguments{previous: state.pressed, event: &event},
+	)
+
+	subscription.buttons[state.reportID] = state.pressed
 }
 
-func (c *capture) updateButtons(state hidReportState) {
-	previous := c.buttons[state.reportID]
-	c.emitButtonChanges(state.pressed, previous, domain.Event{
-		Action: domain.ActionPress,
-		Value:  singleValue, Timestamp: state.stamp,
-	})
-	c.emitButtonChanges(previous, state.pressed, domain.Event{
-		Action: domain.ActionRelease,
-		Value:  noValue, Timestamp: state.stamp,
-	})
-	c.buttons[state.reportID] = state.pressed
-}
-
-func (c *capture) emitButtonChanges(
-	current, previous map[domain.ControlID]bool,
-	event domain.Event,
+func captureEmitButtonChanges(subscription *capture, current map[domain.ControlID]bool,
+	args *buttonChangesArguments,
 ) {
+	previous, event := args.previous, args.event
+
 	for id := range current {
 		if !previous[id] {
 			event.ControlID = id
-			c.emit(event)
+			captureEmit(subscription, event)
 		}
 	}
 }
 
-func logicalValue(word uint32, control ext.NativeControl) int64 {
-	bits := control.BitSize
-	if bits == noValue || bits > thirtySecondValue {
-		return noValue
-	}
-	mask := uint64(singleValue)<<bits - singleValue
-	value := uint64(word) & mask
-	if control.Bounds.LogicalMin < noValue &&
-		value&(uint64(singleValue)<<(bits-singleValue)) != noValue {
-		return int64(value) - int64(uint64(singleValue)<<bits)
-	}
-	return int64(value)
-}
-
 // Factory returns the native backend constructor.
-func Factory() ports.Factory { return newBackend }
+func Factory() ports.Factory {
+	environment := new(nativeState)
+
+	tables, tableErr := makeKeyTables(
+		&[thirdValue]string{scanUsagesData, consumerScansData, consumerVirtualKeysData},
+	)
+
+	environment.tables = tables
+
+	return func(ctx context.Context, retrier ports.Retrier) (ports.Backend, error) {
+		if tableErr != nil {
+			return nil, errors.Join(tableErr)
+		}
+
+		owner, err := newBackend(ctx, environment, retrier)
+		if err != nil {
+			return nil, errors.Join(err)
+		}
+
+		return makeBackendView(ctx, owner), nil
+	}
+}
 
 func resultError[Value any](_ Value, err error) error { return errors.Join(err) }
 
-func classifyValue(ctrl *domain.Control, value hid.HIDP_VALUE_CAPS, bounds domain.Range) {
-	if value.IsAbsolute != noValue {
-		ctrl.Mode, ctrl.Range = domain.AxisAbsolute, &bounds
-	} else {
-		ctrl.Mode, ctrl.Unit = domain.AxisRelative, domain.UnitCounts
-	}
+func classifyValue(ctrl *domain.Control, value *hid.HIDP_VALUE_CAPS, bounds domain.Range) {
 	if unsupportedValue(value) {
 		ctrl.Support = domain.SupportUnsupported
 	}
+
+	if value.IsAbsolute != noValue {
+		ctrl.Mode, ctrl.Range = domain.AxisAbsolute, &bounds
+
+		return
+	}
+
+	ctrl.Mode, ctrl.Unit = domain.AxisRelative, domain.UnitCounts
 }
 
-func unsupportedValue(value hid.HIDP_VALUE_CAPS) bool {
+func unsupportedValue(value *hid.HIDP_VALUE_CAPS) bool {
 	return value.BitSize == noValue || value.BitSize > thirtySecondValue ||
 		(value.IsRange == noValue && value.ReportCount > singleValue)
 }
 
-func isConventionalHat(value hid.HIDP_VALUE_CAPS, usage uint32, bounds domain.Range) bool {
+func isConventionalHat(value *hid.HIDP_VALUE_CAPS, usage uint32, bounds domain.Range) bool {
 	return value.UsagePage == singleValue && usage == hatUsage && value.IsAbsolute != noValue &&
 		conventionalHat(value, bounds.Min, bounds.Max)
 }
 
-func classifyHat(ctrl *domain.Control, value hid.HIDP_VALUE_CAPS, usage uint32) {
+func classifyHat(ctrl *domain.Control, value *hid.HIDP_VALUE_CAPS, usage uint32) {
 	if isConventionalHat(value, usage, logicalBounds(value.LogicalMin, value.LogicalMax)) {
 		ctrl.Kind, ctrl.Unit, ctrl.Range = domain.ControlHat, domain.UnitDirection,
 			&domain.Range{Min: int64(domain.HatNeutral), Max: int64(domain.HatNorthWest)}
+
 		return
 	}
+
 	if value.IsAbsolute != noValue && ctrl.Range.Min == noValue && ctrl.Range.Max == singleValue {
 		ctrl.Kind, ctrl.Unit = domain.ControlSwitch, domain.UnitBoolean
 	}
 }
 
-func cancelPendingCommand(cmd *command) error {
-	if cmd.state.CompareAndSwap(noValue, secondValue) {
-		return context.Cause(cmd.ctx)
+func makeBackendView(
+	ctx context.Context,
+	owner *backend,
+) *backendview.Operations[domain.DeviceInfo, domain.DeviceID, ports.EventSink, ports.Capture] {
+	view := new(
+		backendview.Operations[domain.DeviceInfo, domain.DeviceID, ports.EventSink, ports.Capture],
+	)
+
+	view.Operations.Discover = func(ctx context.Context) ([]domain.DeviceInfo, error) {
+		infos, err := backendDiscover(ctx, owner)
+
+		return infos, errors.Join(err)
 	}
+	view.Operations.Close = func() error { return errors.Join(backendCloseContext(ctx, owner)) }
+	configureBackendOpen(view, owner)
+
+	return view
+}
+
+func nativePointer[Value any](value *Value) unsafe.Pointer {
+	return reflect.ValueOf(value).UnsafePointer()
+}
+
+// NativeInfo copies platform metadata from the bound capture.
+func (view metadataView[Value]) NativeInfo() Value { return view() }
+
+func makeCaptureView(
+	ctx context.Context,
+	subscription *capture,
+) *captureview.Operations[domain.DeviceInfo, domain.Capabilities] {
+	view := new(captureview.Operations[domain.DeviceInfo, domain.Capabilities])
+
+	view.Operations.Info = func() domain.DeviceInfo { return captureInfo(subscription) }
+	view.Operations.Capabilities = func() domain.Capabilities { return captureCapabilities(subscription) }
+	view.Operations.Extension = func(target any) bool { return captureExtension(subscription, target) }
+	view.Operations.Close = func() error { return errors.Join(captureClose(ctx, subscription)) }
+
+	return view
+}
+
+func makeCaptureHost(owner *backend, subscription *capture) *captureHost {
+	host := new(captureHost)
+
+	host.tables = owner.native.tables
+	host.call = func(ctx context.Context, operation func() error) error {
+		return errors.Join(backendCall(ctx, owner, operation))
+	}
+	host.retry = func(ctx context.Context, operation func(context.Context) error) error {
+		return errors.Join(backendRetry(ctx, owner, operation))
+	}
+	configureCaptureRegistration(host, owner, subscription)
+
+	return host
+}
+
+func nativeSize[Value any]() uint32 {
+	var value Value
+
+	return uint32(unsafe.Sizeof(value) & math.MaxUint32)
+}
+
+func makeNativeInfo(device *nativeDevice) ext.Info {
+	return ext.Info{
+		RawInputHandle: uintptr(device.handle), DeviceType: device.kind,
+		UsagePage: device.tlc.page, Usage: device.tlc.usage, Version: device.version, Controls: nil,
+	}
+}
+
+func readCapabilities[Value any](
+	count uint16,
+	read func(*Value, *uint16) foundation.NTSTATUS,
+) ([]Value, error) {
+	if count == noValue {
+		return make([]Value, noValue), nil
+	}
+
+	caps := allocateBuffer[Value](int(count))
+	status := read(&caps[noValue], &count)
+
+	result, err := checkedCapabilities(caps, count, status)
+
+	return result, errors.Join(err)
+}
+
+func checkedCapabilities[Value any](
+	caps []Value,
+	count uint16,
+	status foundation.NTSTATUS,
+) ([]Value, error) {
+	if status != hid.HIDP_STATUS_SUCCESS {
+		return nil, errors.Join(hidError("read HID capabilities", status))
+	}
+
+	if int(count) > len(caps) {
+		return nil, domain.ErrEventLoss
+	}
+
+	return caps[:count], nil
+}
+
+func addCapabilityRange(
+	builder *hidBuilder,
+	span *capabilityRange,
+	makeControl func(uint32, uint32) hidControl,
+) {
+	if span.lastUsage < span.firstUsage {
+		return
+	}
+
+	for offset := uint32(noValue); offset <= span.lastUsage-span.firstUsage; offset++ {
+		control := makeControl(span.firstUsage+offset, span.firstIndex+offset)
+		hidBuilderAdd(builder, &control)
+	}
+}
+
+func awaitBackendStartup(owner *backend) error {
+	err := <-owner.ready
+	if err != nil {
+		<-owner.done
+	}
+
+	return errors.Join(err)
+}
+
+func initializeCallback(environment *nativeState) {
+	environment.callbackOnce.Do(func() {
+		environment.callbackAddr = syscall.NewCallback(func(hwnd foundation.HWND, message uint32,
+			wParam foundation.WPARAM, lParam foundation.LPARAM,
+		) foundation.LRESULT {
+			return nativeStateWindowProc(environment,
+				&windowMessage{hwnd: hwnd, message: message, wParam: wParam, lParam: lParam},
+			)
+		})
+	})
+}
+
+func backendCreateMessageWindow(owner *backend, instance foundation.HINSTANCE) error {
+	window, err := wm.CreateWindowEx(
+		noValue, &owner.className, nil, noValue, noValue, noValue,
+		noValue, noValue, wm.HWND_MESSAGE, noValue, instance, nil,
+	)
+	if err != nil {
+		return errors.Join(normalizeError(err))
+	}
+
+	backendPublishWindow(owner, window)
+
 	return nil
+}
+
+func windowClassName(environment *nativeState) string {
+	return fmt.Sprintf(
+		"goinput.rawinput.%x.%d",
+		environment.callbackAddr,
+		environment.classNumber.Add(singleValue),
+	)
+}
+
+func makeWindowClass(owner *backend, instance foundation.HINSTANCE) wm.WNDCLASSW {
+	var class wm.WNDCLASSW
+
+	class.LpfnWndProc, class.HInstance = wm.WNDPROC(owner.native.callbackAddr), instance
+	class.LpszClassName = native.UTF16Ptr(owner.className)
+
+	return class
+}
+
+func submitCommand(owner *backend, cmd *command) error {
+	enqueueErr := backendEnqueue(owner, cmd)
+	if enqueueErr != nil {
+		return errors.Join(enqueueErr)
+	}
+
+	signalErr := backendSignalCommand(owner, cmd)
+	if signalErr != nil {
+		return errors.Join(signalErr)
+	}
+
+	return nil
+}
+
+func backendRawDevices(ctx context.Context, owner *backend) ([]input.RAWINPUTDEVICELIST, error) {
+	var list []input.RAWINPUTDEVICELIST
+
+	operation := func(ctx context.Context) error {
+		var err error
+
+		list, err = enumerateRawDevices(ctx)
+
+		return errors.Join(err)
+	}
+
+	retryErr := backendRetry(ctx, owner, operation)
+	if retryErr != nil {
+		return nil, errors.Join(normalizeError(retryErr))
+	}
+
+	return list, nil
+}
+
+func prepareCapture(ctx context.Context, owner *backend, subscription *capture) error {
+	metadataErr := captureLoadCapabilities(ctx, subscription)
+	if metadataErr != nil {
+		return errors.Join(normalizeError(metadataErr))
+	}
+
+	err := backendCall(ctx, owner, subscription.backend.register)
+	if err != nil {
+		return errors.Join(normalizeError(err))
+	}
+
+	return nil
+}
+
+func loadDeviceMetadata(device *nativeDevice) error {
+	err := nativeDeviceLoadDeviceInfo(device)
+	if err != nil {
+		return errors.Join(err)
+	}
+
+	return errors.Join(nativeDeviceLoadDevicePath(device))
+}
+
+func applyMouseDeviceInfo(device *nativeDevice, words [sixthValue]uint32) {
+	device.tlc = topLevel{singleValue, secondValue}
+	device.buttons, device.hwheel = words[singleValue], words[thirdValue] != noValue
+	device.info.Classes = []domain.DeviceClass{domain.ClassMouse}
+}
+
+func identityProceduresAvailable() bool {
+	procedures := []*native.Proc{
+		hid.Procs.HidD_GetAttributes, hid.Procs.HidD_GetProductString,
+		hid.Procs.HidD_GetManufacturerString, hid.Procs.HidD_GetSerialNumberString,
+	}
+
+	return findProcedures(procedures) == nil
+}
+
+func appendKeyboardControls(subscription *capture, controls map[domain.ControlID]domain.Control) {
+	for entryIndex := range controls {
+		control := controls[entryIndex]
+
+		subscription.caps.Controls = append(subscription.caps.Controls, control)
+	}
+}
+
+func sortKeyboardControls(subscription *capture) {
+	slices.SortFunc(subscription.caps.Controls,
+
+		func(left, owner domain.Control) int { return cmp.Compare(left.ID, owner.ID) })
+	slices.SortFunc(subscription.native.Controls,
+
+		func(left, owner ext.NativeControl) int {
+			if left.ID == owner.ID {
+				return cmp.Compare(left.ScanCode, owner.ScanCode)
+			}
+
+			return cmp.Compare(left.ID, owner.ID)
+		})
+}
+
+func makeKeyDescriptor(scan uint16, usage domain.Usage) domain.Control {
+	return domain.Control{
+		Mode:    domain.AxisUnknown,
+		ID:      keyID(usage, scan),
+		Name:    keyName(usage),
+		Kind:    domain.ControlKey,
+		Usage:   usage,
+		Mapping: domain.MappingInferred,
+		Range:   &domain.Range{Min: noValue, Max: singleValue},
+		Unit:    domain.UnitBoolean,
+		Support: domain.SupportUnknown,
+	}
+}
+
+func keyName(usage domain.Usage) string {
+	return fmt.Sprintf("Key %04x:%04x", uint16(usage>>sixteenthValue), uint16(usage&wordMask))
+}
+
+func makeKeyNative(id domain.ControlID, scan uint16) ext.NativeControl {
+	var control ext.NativeControl
+
+	control.ID, control.ScanCode = string(id), scan
+
+	if scan&virtualScanPrefix == virtualScanPrefix {
+		control.ScanCode, control.VirtualKey = noValue, scan&byteMask
+	}
+
+	return control
+}
+
+func makeMouseAxis(axis string, usage domain.Usage) domain.Control {
+	return domain.Control{
+		ID: domain.ControlID(
+			"rel:" + axis,
+		),
+		Name:    "Relative " + strings.ToUpper(axis),
+		Kind:    domain.ControlAxis,
+		Usage:   usage,
+		Mapping: domain.MappingInferred,
+		Mode:    domain.AxisRelative,
+		Range:   nil,
+		Unit:    domain.UnitCounts,
+		Support: domain.SupportUnknown,
+	}
+}
+
+func makeAbsoluteMouseAxis(axis string, usage domain.Usage) domain.Control {
+	control := makeMouseAxis(axis, usage)
+
+	control.ID, control.Name = domain.ControlID("abs:"+axis), "Absolute "+strings.ToUpper(axis)
+	control.Mode, control.Unit = domain.AxisAbsolute, domain.UnitLogical
+	control.Range = &domain.Range{Min: noValue, Max: wordMask}
+
+	return control
+}
+
+func makeMouseWheel(id domain.ControlID, usage domain.Usage, name string) domain.Control {
+	return domain.Control{
+		ID:      id,
+		Name:    name,
+		Kind:    domain.ControlAxis,
+		Usage:   usage,
+		Mapping: domain.MappingInferred,
+		Mode:    domain.AxisRelative,
+		Range:   nil,
+		Unit:    domain.UnitDetents,
+		Support: domain.SupportUnknown,
+	}
+}
+
+func makeHIDButtonDescriptor(
+	button *hid.HIDP_BUTTON_CAPS,
+	usage uint32,
+	id domain.ControlID,
+) domain.Control {
+	return domain.Control{
+		Mode:    domain.AxisUnknown,
+		ID:      id,
+		Name:    fmt.Sprintf(hidNameFormat, button.UsagePage, usage),
+		Kind:    buttonKind(button.UsagePage),
+		Usage:   domain.HID(button.UsagePage, uint16(usage&wordMask)),
+		Mapping: domain.MappingReported,
+		Range:   &domain.Range{Min: noValue, Max: singleValue},
+		Unit:    domain.UnitBoolean,
+		Support: buttonSupport(button.IsAbsolute),
+	}
+}
+
+func makeHIDButtonNative(
+	button *hid.HIDP_BUTTON_CAPS,
+	dataIndex uint32,
+	id domain.ControlID,
+) ext.NativeControl {
+	var control ext.NativeControl
+
+	control.ID, control.ReportID = string(id), button.ReportID
+	control.DataIndex, control.LinkCollection = uint16(dataIndex&wordMask), button.LinkCollection
+	control.ReportCount, control.BitSize = button.ReportCount, singleValue
+	control.Bounds.LogicalMax = singleValue
+	control.Absolute = button.IsAbsolute != noValue
+
+	return control
+}
+
+func makeHIDValueNative(
+	value *hid.HIDP_VALUE_CAPS,
+	dataIndex uint32,
+	id domain.ControlID,
+) ext.NativeControl {
+	return ext.NativeControl{
+		ID:             string(id),
+		ReportID:       value.ReportID,
+		DataIndex:      uint16(dataIndex & wordMask),
+		LinkCollection: value.LinkCollection,
+		BitSize:        value.BitSize,
+		ReportCount:    value.ReportCount,
+		Bounds: ext.DescriptorBounds{
+			LogicalMin: value.LogicalMin, LogicalMax: value.LogicalMax,
+			PhysicalMin: value.PhysicalMin, PhysicalMax: value.PhysicalMax,
+		},
+		Units:         value.Units,
+		UnitsExponent: value.UnitsExp,
+		HasNull:       value.HasNull != noValue,
+		Absolute:      value.IsAbsolute != noValue, VirtualKey: noValue, ScanCode: noValue,
+	}
+}
+
+func addCapabilities[Value any](values []Value, add func(*Value) error) error {
+	for index := range values {
+		err := add(&values[index])
+		if err != nil {
+			return errors.Join(err)
+		}
+	}
+
+	return nil
+}
+
+func finishBackendStartup(ctx context.Context, owner *backend) (*backend, error) {
+	err := awaitBackendStartup(owner)
+	if err != nil {
+		return nil, errors.Join(err)
+	}
+
+	result, startupErr := backendCheckStartup(ctx, owner)
+	if startupErr != nil {
+		return nil, errors.Join(startupErr)
+	}
+
+	return result, nil
+}
+
+func completeCaptureOpen(
+	ctx context.Context,
+	owner *backend,
+	subscription *capture,
+) (*capture, error) {
+	err := prepareCapture(ctx, owner, subscription)
+	if err != nil {
+		return nil, errors.Join(err)
+	}
+
+	result, openErr := captureCheckOpened(ctx, subscription)
+	if openErr != nil {
+		return nil, errors.Join(openErr)
+	}
+
+	return result, nil
+}
+
+func readDeviceInventory[Value any](
+	count, size uint32,
+	read func(uint32, uint32) ([]Value, error),
+) ([]Value, error) {
+	if count > maxDevices {
+		return nil, domain.ErrInvalidOptions
+	}
+
+	if count == noValue {
+		return make([]Value, noValue), nil
+	}
+
+	values, err := read(count, size)
+
+	return values, errors.Join(err)
+}
+
+func describeInventoryEntry(ctx context.Context, owner *backend, args *inventoryEntryArguments) {
+	device, err := backendDescribeRawDevice(ctx, owner, args.item)
+	deviceSnapshotAdd(args.snapshot, &device, err)
+}
+
+func applyKeyboardDeviceInfo(device *nativeDevice) {
+	device.tlc = topLevel{singleValue, sixthValue}
+	device.info.Classes = []domain.DeviceClass{domain.ClassKeyboard}
+}
+
+func openIdentityHandle(path string) (*identityHandle, error) {
+	handle, err := filesystem.CreateFile(path, noValue, filesystem.FILE_SHARE_MODE(thirdValue), nil,
+		filesystem.FILE_CREATION_DISPOSITION(thirdValue), noValue, noValue)
+	if err != nil {
+		return nil, fmt.Errorf("open identity handle: %w", err)
+	}
+
+	return &identityHandle{value: handle}, nil
+}
+
+func makeHIDValueDescriptor(
+	value *hid.HIDP_VALUE_CAPS,
+	usage uint32,
+	id domain.ControlID,
+) domain.Control {
+	return domain.Control{
+		Mode: domain.AxisUnknown,
+		ID:   id,
+		Name: fmt.Sprintf(hidNameFormat, value.UsagePage, usage),
+		Kind: domain.ControlAxis,
+		Usage: domain.HID(
+			value.UsagePage,
+			uint16(usage&wordMask),
+		),
+		Mapping: domain.MappingReported,
+		Unit:    domain.UnitLogical,
+		Support: domain.SupportSupported, Range: nil,
+	}
+}
+
+func decodeKeyboard(data []byte) keyboardInput {
+	return keyboardInput{
+		makeCode:   binary.LittleEndian.Uint16(data),
+		flags:      binary.LittleEndian.Uint16(data[secondValue:]),
+		virtualKey: binary.LittleEndian.Uint16(data[sixthValue:]),
+	}
+}
+
+func updateKeyState(
+	subscription *capture,
+	key keyboardInput,
+	id domain.ControlID,
+) (action domain.EventAction, value float64) {
+	if key.flags&singleValue != noValue {
+		delete(subscription.held, id)
+
+		return domain.ActionRelease, noValue
+	}
+
+	action = domain.ActionPress
+
+	if subscription.held[id] {
+		action = domain.ActionRepeat
+	}
+
+	subscription.held[id] = true
+
+	return action, singleValue
+}
+
+func emitMouseButton(subscription *capture, mouse *mouseInput, args *mouseButtonArguments) {
+	event := domain.Event{
+		DeviceID:  emptyString,
+		ControlID: args.id,
+		Timestamp: mouse.stamp,
+		Action:    domain.ActionPress,
+		Value:     singleValue,
+	}
+	if args.flags&singleValue != noValue {
+		captureEmit(subscription, &event)
+	}
+
+	event.Action, event.Value = domain.ActionRelease, noValue
+	if args.flags&secondValue != noValue {
+		captureEmit(subscription, &event)
+	}
+}
+
+func configureBackendOpen(
+	view *backendview.Operations[domain.DeviceInfo, domain.DeviceID, ports.EventSink, ports.Capture],
+	owner *backend,
+) {
+	view.Operations.Open = func(ctx context.Context, id domain.DeviceID, sink ports.EventSink) (ports.Capture, error) {
+		subscription, err := backendOpen(ctx, owner, &backendOpenArguments{id: id, sink: sink})
+		if err != nil {
+			return nil, errors.Join(err)
+		}
+
+		return makeCaptureView(ctx, subscription), nil
+	}
+}
+
+func configureCaptureRegistration(host *captureHost, owner *backend, subscription *capture) {
+	host.register = func() error { return errors.Join(captureRegister(owner, subscription)) }
+	host.unregister = func() error { return errors.Join(captureUnregister(owner, subscription)) }
+}
+
+func hidDataIndex(report byte, index uint16) hidIndex {
+	return uint32(report)<<sixteenthValue | uint32(index)
+}
+
+func finishDeviceSnapshot(ctx context.Context, snapshot *deviceSnapshot) ([]nativeDevice, error) {
+	slices.SortFunc(
+		snapshot.devices,
+		func(left, owner nativeDevice) int { return cmp.Compare(left.info.ID, owner.info.ID) },
+	)
+
+	return snapshot.devices, errors.Join(snapshot.diagnostics, context.Cause(ctx))
+}
+
+func enrichDeviceIdentity(ctx context.Context, device *nativeDevice) error {
+	cause := context.Cause(ctx)
+	if cause != nil {
+		return errors.Join(cause)
+	}
+
+	return errors.Join(enrichIdentity(device))
+}
+
+func addPhysicalKeyControls(subscription *capture, controls map[domain.ControlID]domain.Control) {
+	captureAddScanControls(
+		subscription,
+		controls,
+		&captureAddScanControlsArguments{
+			scans: subscription.backend.tables.keyboard,
+			page:  seventhValue,
+		},
+	)
+	captureAddScanControls(
+		subscription,
+		controls,
+		&captureAddScanControlsArguments{
+			scans: subscription.backend.tables.consumer,
+			page:  twelfthValue,
+		},
+	)
+}
+
+func descriptorPointer(desc *descriptor) hid.PHIDP_PREPARSED_DATA {
+	return hid.PHIDP_PREPARSED_DATA(uintptr(nativePointer(&desc.preparsed[noValue])))
+}
+
+func readNativeCapabilities[Value any](count uint16, preparsed hid.PHIDP_PREPARSED_DATA,
+	read func(hid.HIDP_REPORT_TYPE, *Value, *uint16, hid.PHIDP_PREPARSED_DATA) foundation.NTSTATUS,
+) ([]Value, error) {
+	values, err := readCapabilities(count, func(first *Value, length *uint16) foundation.NTSTATUS {
+		return read(hid.HidP_Input, first, length, preparsed)
+	})
+
+	return values, errors.Join(err)
+}
+
+func emitAbsoluteCoordinate(
+	subscription *capture,
+	id domain.ControlID,
+	args *captureRelativeAxisArguments,
+) {
+	captureAbsoluteAxis(
+		subscription,
+		id,
+		&captureAbsoluteAxisArguments{value: args.value, stamp: args.stamp},
+	)
+}
+
+func addNativeCapability(builder *hidBuilder, args *nativeCapability) error {
+	if args.alias != noValue {
+		return nil
+	}
+
+	span, err := capRange(args.words, uint8(args.rangeKind))
+	if err != nil {
+		return errors.Join(err)
+	}
+
+	addCapabilityRange(builder, &span, args.makeControl)
+
+	return nil
+}
+
+func makeNativeCapability(
+	words [eighthValue]uint16,
+	rangeKind, alias foundation.BOOLEAN,
+) *nativeCapability {
+	return &nativeCapability{words: words, rangeKind: rangeKind, alias: alias, makeControl: nil}
+}
+
+func bindCapability[Value any](
+	value *Value,
+	makeControl func(*Value, uint32, uint32) hidControl,
+) func(uint32, uint32) hidControl {
+	return func(usage, index uint32) hidControl { return makeControl(value, usage, index) }
+}
+
+func makeButtonEvent(state *hidReportState) domain.Event {
+	return domain.Event{
+		DeviceID:  emptyString,
+		ControlID: emptyString,
+		Action:    domain.ActionPress,
+		Value:     singleValue,
+		Timestamp: state.stamp,
+	}
+}
+
+func makeCapabilityAdder[Value any](
+	builder *hidBuilder,
+	args *capabilityAdapter[Value],
+) func(*Value) error {
+	return func(value *Value) error {
+		spec := args.project(value)
+
+		spec.makeControl = bindCapability(value, args.makeControl)
+
+		return errors.Join(addNativeCapability(builder, spec))
+	}
+}
+
+func makeCapabilityAdapter[Value any](
+	read func(hid.HIDP_REPORT_TYPE, *Value, *uint16, hid.PHIDP_PREPARSED_DATA) foundation.NTSTATUS,
+	project func(*Value) *nativeCapability,
+	makeControl func(*Value, uint32, uint32) hidControl,
+) *capabilityAdapter[Value] {
+	return &capabilityAdapter[Value]{read: read, project: project, makeControl: makeControl}
+}
+
+func loadNativeCapabilitySet[Value any](
+	builder *hidBuilder,
+	count uint16,
+	args *capabilityAdapter[Value],
+) error {
+	values, err := readNativeCapabilities(count, hidBuilderPreparsedPointer(builder), args.read)
+	if err != nil {
+		return errors.Join(err)
+	}
+
+	return errors.Join(addCapabilities(values, makeCapabilityAdder(builder, args)))
 }

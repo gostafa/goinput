@@ -13,67 +13,84 @@ import (
 
 	hid "github.com/deploymenttheory/go-bindings-win32/bindings/win32/devices/humaninterfacedevice"
 	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/foundation"
+	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/ui/input"
 	ext "github.com/gostafa/goinput/extensions/win32"
 	"github.com/gostafa/goinput/internal/domain"
 	"github.com/gostafa/goinput/internal/ports"
 )
 
 type (
-	commandWait struct {
-		command     *command
+	captureHost                 = captureServices[*keyTables]
+	captureServices[Tables any] struct {
+		tables     Tables
+		call       func(context.Context, func() error) error
+		retry      func(context.Context, func(context.Context) error) error
+		register   func() error
+		unregister func() error
+	}
+
+	metadataView[Value any] func() Value
+
+	nativeState = nativeStateRecord[*keyTables]
+
+	nativeStateRecord[Tables any] struct {
+		tables       Tables
+		windows      sync.Map
+		callbackAddr uintptr
+		classNumber  atomic.Uint64
+		callbackOnce sync.Once
+	}
+	commandWait = commandWaitRecord[*command]
+
+	commandWaitRecord[Command any] struct {
+		err         error
+		command     Command
 		contextDone <-chan struct{}
 		complete    bool
-		err         error
 	}
-	deviceSnapshot struct {
-		devices     []nativeDevice
+	deviceSnapshot = deviceSnapshotRecord[nativeDevice]
+
+	deviceSnapshotRecord[Device any] struct {
 		diagnostics error
+		devices     []Device
 	}
 	errorCategory struct {
 		native error
 		domain error
 	}
-	inputPacket struct {
-		kind   uint32
-		device foundation.HANDLE
-		body   []byte
-		stamp  domain.Timestamp
-	}
-	keyboardInput struct {
-		makeCode   uint16
-		flags      uint16
-		virtualKey uint16
-	}
-	mouseInput struct {
+	mouseInput = mouseInputRecord[domain.Timestamp]
+
+	mouseInputRecord[Stamp any] struct {
+		stamp   Stamp
+		x       int64
+		y       int64
 		flags   uint16
 		buttons uint16
 		wheel   int16
-		x       int64
-		y       int64
-		stamp   domain.Timestamp
 	}
-	reportBatch struct {
+	reportBatch = reportBatchRecord[domain.Timestamp]
+
+	reportBatchRecord[Stamp any] struct {
+		stamp Stamp
 		size  uint32
 		count uint32
-		stamp domain.Timestamp
 	}
-	hidReportState struct {
+	hidReportState = hidReportStateRecord[domain.Timestamp, domain.ControlID]
+
+	hidReportStateRecord[Stamp any, Control comparable] struct {
+		pressed  map[Control]bool
+		stamp    Stamp
 		reportID byte
-		stamp    domain.Timestamp
-		pressed  map[domain.ControlID]bool
 	}
-	hidBuilder struct {
-		descriptor     *descriptor
-		caps           hid.HIDP_CAPS
-		controls       []domain.Control
-		nativeControls []ext.NativeControl
+	hidBuilder = hidBuilderRecord[*descriptor, hid.HIDP_CAPS, domain.Control, ext.NativeControl]
+
+	hidBuilderRecord[Descriptor any, Caps any, Control any, Native any] struct {
+		descriptor     Descriptor
+		caps           Caps
+		controls       []Control
+		nativeControls []Native
 	}
-	capabilityRange struct {
-		firstUsage uint32
-		lastUsage  uint32
-		firstIndex uint32
-		lastIndex  uint32
-	}
+
 	nativeBuffer struct {
 		data unsafe.Pointer
 		size *uint32
@@ -84,27 +101,23 @@ type (
 		wParam  foundation.WPARAM
 		lParam  foundation.LPARAM
 	}
-	backend struct {
-		mu            sync.Mutex
-		hwnd          foundation.HWND
-		wakeEvent     foundation.HANDLE
-		closed        bool
-		commands      chan *command
-		ready         chan error
-		done          chan struct{}
-		retrier       ports.Retrier
-		closeErr      error
-		className     string
-		stopping      bool // owner-thread fields below
-		captures      map[foundation.HANDLE]map[*capture]struct{}
-		registrations map[topLevel]int
-	}
+	backend = backendRecord[*nativeState, *command, ports.Retrier, *capture, topLevel]
 
-	command struct {
-		ctx   context.Context
-		fn    func() error
-		reply chan error
-		state atomic.Int32
+	backendRecord[Native any, Command any, Retrier any, Capture comparable, Usage comparable] struct {
+		retrier       Retrier
+		closeErr      error
+		ready         chan error
+		commands      chan Command
+		native        Native
+		done          chan struct{}
+		captures      map[foundation.HANDLE]map[Capture]struct{}
+		registrations map[Usage]int
+		className     string
+		wakeEvent     foundation.HANDLE
+		hwnd          foundation.HWND
+		mu            sync.Mutex
+		closed        bool
+		stopping      bool
 	}
 
 	topLevel struct {
@@ -112,49 +125,126 @@ type (
 		usage uint16
 	}
 
-	nativeDevice struct {
+	nativeDevice = nativeDeviceRecord[topLevel, domain.DeviceInfo]
+
+	nativeDeviceRecord[TopLevel any, Info any] struct {
+		info    Info
+		tlc     TopLevel
 		handle  foundation.HANDLE
 		kind    uint32
-		tlc     topLevel
 		version uint32
 		buttons uint32
 		hwheel  bool
-		info    domain.DeviceInfo
 	}
 
-	capture struct {
-		backend   *backend
-		device    nativeDevice
-		info      domain.DeviceInfo
-		caps      domain.Capabilities
-		native    ext.Info
-		sink      ports.EventSink
-		closed    atomic.Bool
-		closeOnce sync.Once
+	capture = captureRecord[
+		*captureHost,
+		nativeDevice,
+		domain.DeviceInfo,
+		domain.Capabilities,
+		ext.Info,
+		ports.EventSink,
+		*descriptor,
+		domain.ControlID,
+	]
+
+	captureRecord[
+		Backend any,
+		Device any,
+		Info any,
+		Caps any,
+		Native any,
+		Sink any,
+		Descriptor any,
+		Control comparable,
+	] struct {
+		sink      Sink
 		closeErr  error
-		hid       *descriptor
-		held      map[domain.ControlID]bool
-		values    map[domain.ControlID]int64
-		buttons   map[byte]map[domain.ControlID]bool
+		held      map[Control]bool
+		backend   Backend
+		buttons   map[byte]map[Control]bool
+		values    map[Control]int64
+		hid       Descriptor
+		info      Info
+		caps      Caps
+		native    Native
+		device    Device
+		closeOnce sync.Once
+		closed    atomic.Bool
 	}
 
-	descriptor struct {
-		preparsed []byte
-		reportLen uint16
-		maxData   uint32
-		controls  map[hidIndex]hidControl
+	descriptor = descriptorRecord[hidIndex, hidControl]
+
+	descriptorRecord[Index comparable, Control any] struct {
+		controls  map[Index]Control
 		reportIDs map[byte]bool
+		preparsed []byte
+		maxData   uint32
+		reportLen uint16
 	}
 
-	hidIndex struct {
-		report byte
-		index  uint16
-	}
+	hidIndex = uint32
 
-	hidControl struct {
-		control domain.Control
-		native  ext.NativeControl
+	hidControl = hidControlRecord[domain.Control, ext.NativeControl]
+
+	hidControlRecord[Control any, Native any] struct {
+		control Control
+		native  Native
 		button  bool
 		hat     bool
+	}
+
+	backendOpenArguments = struct {
+		sink ports.EventSink
+		id   domain.DeviceID
+	}
+	captureAddScanControlsArguments = struct {
+		scans map[uint16]uint16
+
+		page uint16
+	}
+	captureAbsoluteAxisArguments = struct {
+		stamp *domain.Timestamp
+		value int64
+	}
+	captureRelativeAxisArguments = struct {
+		stamp *domain.Timestamp
+		value int64
+	}
+	captureProcessHIDControlArguments = struct {
+		state *hidReportState
+		word  uint32
+	}
+	captureEmitHIDValueArguments = struct {
+		stamp *domain.Timestamp
+		value int64
+	}
+	inventoryEntryArguments = struct {
+		snapshot *deviceSnapshot
+		item     input.RAWINPUTDEVICELIST
+	}
+	mouseButtonArguments = struct {
+		id    domain.ControlID
+		flags uint16
+	}
+
+	buttonChangesArguments = struct {
+		previous map[domain.ControlID]bool
+		event    *domain.Event
+	}
+
+	nativeCapability = struct {
+		makeControl func(uint32, uint32) hidControl
+		words       [eighthValue]uint16
+		rangeKind   foundation.BOOLEAN
+		alias       foundation.BOOLEAN
+	}
+
+	identityHandle = struct{ value foundation.HANDLE }
+
+	capabilityAdapter[Value any] = struct {
+		read        func(hid.HIDP_REPORT_TYPE, *Value, *uint16, hid.PHIDP_PREPARSED_DATA) foundation.NTSTATUS
+		project     func(*Value) *nativeCapability
+		makeControl func(*Value, uint32, uint32) hidControl
 	}
 )
