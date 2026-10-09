@@ -668,7 +668,7 @@ func testNativeLifecycleStep8Continue(
 	state *testNativeLifecycleState,
 ) {
 	t.Helper()
-	testNativeLifecycleUnhandledMessage(t, api, state, keyboardScanCount)
+	state.testUnhandledMessage(t, api, keyboardScanCount)
 	testNativeLifecycleStep9(t, api, state)
 }
 
@@ -678,14 +678,13 @@ func testNativeLifecycleStep9Continue(
 	state *testNativeLifecycleState,
 ) {
 	t.Helper()
-	testNativeLifecycleUnhandledMessage(t, api, state, byteMask)
+	state.testUnhandledMessage(t, api, byteMask)
 	testNativeLifecycleStep10(t, api, state)
 }
 
-func testNativeLifecycleUnhandledMessage(
+func (state *testNativeLifecycleState) testUnhandledMessage(
 	t *testing.T,
 	api *nativeAPI,
-	state *testNativeLifecycleState,
 	message uint32,
 ) {
 	t.Helper()
