@@ -1,5 +1,5 @@
 coverage.out
-custom-golangci-lint
+custom-golangci-lint*
 .qodo
 coverage.*
 coverage.html
