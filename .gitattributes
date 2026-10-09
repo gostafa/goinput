@@ -1,0 +1,4 @@
+# Keep YAML line endings consistent with yamllint on every platform.
+*.yml text eol=lf
+*.yaml text eol=lf
+.yamllint text eol=lf
