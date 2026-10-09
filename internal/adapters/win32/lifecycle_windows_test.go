@@ -43,13 +43,13 @@ type (
 func fixtureBackend(t *testing.T) *backend {
 	t.Helper()
 
-	return makeBackend(nativeNew[nativeState](func(value *nativeState) {
+	return makeBackend(nativeNew(func(value *nativeState) {
 		value.tables = testKeyTables(t)
 	}), nil)
 }
 
 func fixtureCommand(ctx context.Context, operation func() error) *command {
-	return nativeNew[command](func(value *command) {
+	return nativeNew(func(value *command) {
 		value.commandState = makeCommand(ctx, operation)
 		value.reply = make(chan error, singleValue)
 	})
@@ -140,7 +140,7 @@ func testNativeCommandsStep14(t *testing.T, state *testNativeCommandsState) {
 func testNativeCommandsStep15(t *testing.T, state *testNativeCommandsState) {
 	t.Helper()
 
-	state.wait = nativeNew[commandWait](func(value *commandWait) {
+	state.wait = nativeNew(func(value *commandWait) {
 		value.command = fixtureCommand(state.ctx(), func() error {
 			return nil
 		})
@@ -155,7 +155,7 @@ func testNativeCommandsStep16(t *testing.T, state *testNativeCommandsState) {
 	t.Helper()
 	assertCoreEqual(t, state.wait.complete, true)
 
-	state.wait = nativeNew[commandWait](func(value *commandWait) {
+	state.wait = nativeNew(func(value *commandWait) {
 		value.command = state.started
 		value.contextDone = state.ctx().Done()
 	})
@@ -290,7 +290,7 @@ func testNativeLifecycleStep10(t *testing.T, api *nativeAPI, state *testNativeLi
 		t,
 		backendHandleWindowMessage(
 			state.owner,
-			nativeNew[windowMessage](func(value *windowMessage) {
+			nativeNew(func(value *windowMessage) {
 				value.message = byteMask
 				value.wParam = singleValue
 			}),
@@ -636,7 +636,7 @@ func testNativeLifecycleStep9(t *testing.T, api *nativeAPI, state *testNativeLif
 		t,
 		backendHandleWindowMessage(
 			state.owner,
-			nativeNew[windowMessage](func(value *windowMessage) {
+			nativeNew(func(value *windowMessage) {
 				value.message = messageDeviceChange
 				value.wParam = secondValue
 			}),
@@ -672,7 +672,7 @@ func testNativeLifecycleStep8Continue(
 		t,
 		backendHandleWindowMessage(
 			state.owner,
-			nativeNew[windowMessage](func(value *windowMessage) {
+			nativeNew(func(value *windowMessage) {
 				value.message = keyboardScanCount
 			}),
 			api,
@@ -690,7 +690,7 @@ func testNativeLifecycleStep9Continue(
 	t.Helper()
 	assertCoreEqual(
 		t,
-		backendHandleInputMessage(state.owner, new(windowMessage), api),
+		backendHandleWindowMessage(state.owner, &windowMessage{message: byteMask}, api),
 		foundation.LRESULT(seventhValue),
 	)
 	testNativeLifecycleStep10(t, api, state)
