@@ -7,8 +7,4 @@ includes:
     vars:
       GO_JUNIT_REPORT_IN: test-result.txt
       GO_JUNIT_REPORT_OUT: junit.xml
-      YAMLFIX_TARGETS: >-
-        .custom-gcl.yml .golangci.yml Taskfile.yml
-        .github/actionlint.yaml .github/actions/auto-fix/action.yml
-        .github/actions/ci/action.yml .github/actions/taskotter/action.yml
-        .github/workflows/main.yml
+      YAMLFIX_EXTRA_ARGS: --exclude "taskotter/**/*"

@@ -13,10 +13,11 @@ runs:
     - name: Run CI with fix
       shell: bash
       run: |
+        # Keep each glob attached to its option so Click does not expand it on Windows.
         if [[ "$RUNNER_OS" == "Windows" ]]; then
-          export YAMLFIX_EXTRA_ARGS='--exclude \".github/workflows/**/*\" --exclude \"taskotter/**/*\"'
+          export YAMLFIX_EXTRA_ARGS='--exclude=\".github/workflows/**/*\" --exclude=\"taskotter/**/*\"'
         else
-          export YAMLFIX_EXTRA_ARGS='--exclude ".github/workflows/**/*" --exclude "taskotter/**/*"'
+          export YAMLFIX_EXTRA_ARGS='--exclude=".github/workflows/**/*" --exclude="taskotter/**/*"'
         fi
         task taskotter:ci:fix
     - name: Create fix PR
