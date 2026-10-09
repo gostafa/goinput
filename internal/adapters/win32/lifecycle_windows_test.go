@@ -668,17 +668,7 @@ func testNativeLifecycleStep8Continue(
 	state *testNativeLifecycleState,
 ) {
 	t.Helper()
-	assertCoreEqual(
-		t,
-		backendHandleWindowMessage(
-			state.owner,
-			nativeNew(func(value *windowMessage) {
-				value.message = keyboardScanCount
-			}),
-			api,
-		),
-		foundation.LRESULT(seventhValue),
-	)
+	testNativeLifecycleUnhandledMessage(t, api, state, keyboardScanCount)
 	testNativeLifecycleStep9(t, api, state)
 }
 
@@ -688,18 +678,28 @@ func testNativeLifecycleStep9Continue(
 	state *testNativeLifecycleState,
 ) {
 	t.Helper()
+	testNativeLifecycleUnhandledMessage(t, api, state, byteMask)
+	testNativeLifecycleStep10(t, api, state)
+}
+
+func testNativeLifecycleUnhandledMessage(
+	t *testing.T,
+	api *nativeAPI,
+	state *testNativeLifecycleState,
+	message uint32,
+) {
+	t.Helper()
 	assertCoreEqual(
 		t,
 		backendHandleWindowMessage(
 			state.owner,
 			nativeNew(func(value *windowMessage) {
-				value.message = byteMask
+				value.message = message
 			}),
 			api,
 		),
 		foundation.LRESULT(seventhValue),
 	)
-	testNativeLifecycleStep10(t, api, state)
 }
 
 func testNativeLifecycleStep10Finish(
