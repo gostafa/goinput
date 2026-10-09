@@ -454,11 +454,8 @@ func testNativeLifecycleStep21(t *testing.T, api *nativeAPI, state *testNativeLi
 func testNativeLifecycleStep22(t *testing.T, api *nativeAPI, state *testNativeLifecycleState) {
 	t.Helper()
 	close(state.owner.done)
-	assertCoreError(
-		t,
-		resultError(finishBackendStartup(t.Context(), state.owner, api)),
-		domain.ErrUnsupported,
-	)
+	state.err = resultError(finishBackendStartup(t.Context(), state.owner, api))
+	assertCoreError(t, state.err, domain.ErrUnsupported)
 
 	state.owner = fixtureBackend(t)
 	testNativeLifecycleStep23(t, api, state)
