@@ -690,7 +690,13 @@ func testNativeLifecycleStep9Continue(
 	t.Helper()
 	assertCoreEqual(
 		t,
-		backendHandleWindowMessage(state.owner, &windowMessage{message: byteMask}, api),
+		backendHandleWindowMessage(
+			state.owner,
+			nativeNew(func(value *windowMessage) {
+				value.message = byteMask
+			}),
+			api,
+		),
 		foundation.LRESULT(seventhValue),
 	)
 	testNativeLifecycleStep10(t, api, state)

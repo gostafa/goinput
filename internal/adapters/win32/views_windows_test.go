@@ -70,7 +70,7 @@ func testNativeViewsStep11(t *testing.T, api *nativeAPI, state *testNativeViewsS
 		resultError(makeFactory(state.owner.native, domain.ErrUnsupported, api)(t.Context(), nil)),
 		domain.ErrUnsupported,
 	)
-	assertCoreError(t, resultError(factoryWithNative(api)(state.ctx(), nil)), context.Canceled)
+	assertCoreError(t, resultError(Factory()(state.ctx(), nil)), context.Canceled)
 	testNativeViewsStep12(t, api, state)
 }
 
