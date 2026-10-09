@@ -12,7 +12,13 @@ runs:
   steps:
     - name: Run CI with fix
       shell: bash
-      run: YAMLFIX_EXTRA_ARGS='--exclude ".github/workflows/**/*" --exclude "taskotter/**/*"' task taskotter:ci:fix
+      run: |
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          export YAMLFIX_EXTRA_ARGS='--exclude \".github/workflows/**/*\" --exclude \"taskotter/**/*\"'
+        else
+          export YAMLFIX_EXTRA_ARGS='--exclude ".github/workflows/**/*" --exclude "taskotter/**/*"'
+        fi
+        task taskotter:ci:fix
     - name: Create fix PR
       uses: $/.github/actions/auto-fix
       with:
