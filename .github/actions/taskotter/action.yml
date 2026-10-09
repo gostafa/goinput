@@ -13,7 +13,7 @@ inputs:
   store-version:
     description: TaskOtter store version
     required: false
-    default: v0.0.17
+    default: v0.0.18
   tasks:
     description: TaskOtter tasks to run
     required: false
