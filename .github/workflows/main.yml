@@ -6,26 +6,26 @@ on:
   workflow_dispatch: null
 
 jobs:
-  taskotter:
-    name: Taskotter
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-      id-token: write
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-          persist-credentials: true
-      - name: Update repository tooling with TaskOtter
-        uses: $/.github/actions/taskotter
-        with:
-          github-token: ${{ github.token }}
+  # taskotter:
+  #   name: Taskotter
+  #   runs-on: ubuntu-latest
+  #   permissions:
+  #     contents: write
+  #     pull-requests: write
+  #     id-token: write
+  #   steps:
+  #     - name: Check out repository
+  #       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+  #       with:
+  #         fetch-depth: 0
+  #         persist-credentials: true
+  #     - name: Update repository tooling with TaskOtter
+  #       uses: $/.github/actions/taskotter
+  #       with:
+  #         github-token: ${{ github.token }}
   pipeline:
     name: CI (${{ matrix.os }})
-    needs: taskotter
+    # needs: taskotter
     strategy:
       fail-fast: false
       matrix:
