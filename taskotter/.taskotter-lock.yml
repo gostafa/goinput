@@ -58,7 +58,7 @@ managed_files:
     source_path: taskfiles/go-junit-report/README.md
   - destination_module: go-junit-report
     path: taskotter/go-junit-report/Taskfile.yml
-    sha256: 1a078a9b816accb0cd1d221030790117d657157e183c0e3214e10be1d2dd7f31
+    sha256: 6de0a3089fc5f4200b0171ea86b8c915302f19f0066e92170af0cab4d1151523
     source_module: go-junit-report
     source_path: taskfiles/go-junit-report/Taskfile.yml
   - destination_module: go
@@ -113,12 +113,12 @@ managed_files:
     source_path: taskfiles/winget/Taskfile.yml
   - destination_module: yamlfix
     path: taskotter/yamlfix/README.md
-    sha256: 2b89f05803d15c3327280a705fbaeb4e29c9d2329f7ff8454aef1915d972096d
+    sha256: 6f81947d2ac01175aa5d2976b91e4c98f8b02cc51da782ed6e983c700bd81d8f
     source_module: yamlfix
     source_path: taskfiles/yamlfix/README.md
   - destination_module: yamlfix
     path: taskotter/yamlfix/Taskfile.yml
-    sha256: 8bc28c7626a8c023606a82784f749533ece58ec3c4769f35ea8d70c41884d8bd
+    sha256: 1262d6956c9081e81399cb922f6166a222cfc555d709e15e11398b30e84ceea4
     source_module: yamlfix
     source_path: taskfiles/yamlfix/Taskfile.yml
   - destination_module: yamllint
@@ -191,6 +191,6 @@ resolved_modules:
 source:
   default_branch: main
   repository: task-otter/store
-  requested_version: v0.0.17
-  resolved_commit: d5258c47d8ffa713fc97b05ffed81bac340459b0
-  source_ref: refs/tags/v0.0.17
+  requested_version: v0.0.18
+  resolved_commit: ba2adcd28a19b048510e8700480e8e02cc8086ee
+  source_ref: refs/tags/v0.0.18
